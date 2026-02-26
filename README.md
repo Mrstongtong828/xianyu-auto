@@ -251,7 +251,7 @@ mkdir -p xianyu-auto-reply
 
 # 2. 一键启动容器（支持AMD64/ARM64，自动选择架构）
 docker run -d \
-  -p 8080:8080 \
+  -p 8080:8090 \
   --restart always \
   -v $PWD/xianyu-auto-reply/:/app/data/ \
   --name xianyu-auto-reply \
@@ -265,7 +265,7 @@ docker run -d \
 ```bash
 # 使用Docker Hub国际镜像
 docker run -d \
-  -p 8080:8080 \
+  -p 8080:8090 \
   --restart always \
   -v $PWD/xianyu-auto-reply/:/app/data/ \
   --name xianyu-auto-reply \
@@ -278,17 +278,17 @@ docker run -d \
 mkdir xianyu-auto-reply
 
 # 国内用户（阿里云）
-docker run -d -p 8080:8080 --restart always -v %cd%/xianyu-auto-reply/:/app/data/ --name xianyu-auto-reply registry.cn-shanghai.aliyuncs.com/zhinian-software/xianyu-auto-reply:latest
+docker run -d -p 8080:8090 --restart always -v %cd%/xianyu-auto-reply/:/app/data/ --name xianyu-auto-reply registry.cn-shanghai.aliyuncs.com/zhinian-software/xianyu-auto-reply:latest
 
 # 国际用户（Docker Hub）
-docker run -d -p 8080:8080 --restart always -v %cd%/xianyu-auto-reply/:/app/data/ --name xianyu-auto-reply zhinianblog/xianyu-auto-reply:latest
+docker run -d -p 8080:8090 --restart always -v %cd%/xianyu-auto-reply/:/app/data/ --name xianyu-auto-reply zhinianblog/xianyu-auto-reply:latest
 ```
 
 **ARM64服务器** (Oracle Cloud, AWS Graviton等)：
 ```bash
 # Docker会自动选择ARM64镜像，无需特殊配置
 docker run -d \
-  -p 8080:8080 \
+  -p 8080:8090 \
   --restart always \
   -v $PWD/xianyu-auto-reply/:/app/data/ \
   --name xianyu-auto-reply \
@@ -304,10 +304,10 @@ git clone https://github.com/zhinianboke/xianyu-auto-reply.git
 cd xianyu-auto-reply
 
 # 2. 使用完整版配置（包含Redis缓存等增强功能）
-docker-compose up -d --build
+docker compose up -d --build
 
 # 3. 访问系统
-# http://localhost:8080
+# http://localhost:9000
 ```
 
 #### 🇨🇳 中国版（推荐国内用户）
@@ -317,19 +317,19 @@ git clone https://github.com/zhinianboke/xianyu-auto-reply.git
 cd xianyu-auto-reply
 
 # 2. 使用中国镜像源配置（下载速度更快）
-docker-compose -f docker-compose-cn.yml up -d --build
+docker compose -f docker-compose-cn.yml up -d --build
 
 # 3. 访问系统
-# http://localhost:8080
+# http://localhost:8000
 ```
 
 **Windows用户**：
 ```cmd
 # 国际版
-docker-compose up -d --build
+docker compose up -d --build
 
 # 中国版（推荐）
-docker-compose -f docker-compose-cn.yml up -d --build
+docker compose -f docker-compose-cn.yml up -d --build
 ```
 </details>
 
@@ -357,7 +357,7 @@ playwright install-deps chromium  # Linux需要
 python Start.py
 
 # 6. 访问系统
-# http://localhost:8080
+# http://localhost:8090
 ```
 
 ### 📋 环境要求
@@ -396,7 +396,7 @@ python Start.py
 
 ```bash
 # 基础配置
-WEB_PORT=8080                          # Web服务端口
+API_PORT=8090                          # Web服务端口（容器内）
 API_HOST=0.0.0.0                       # API服务主机
 TZ=Asia/Shanghai                       # 时区设置
 
@@ -432,12 +432,19 @@ CPU_LIMIT=2.0                          # CPU限制(核心数)
 
 部署完成后，您可以通过以下方式访问系统：
 
-- **Web管理界面**：http://localhost:8090
+- **Web管理界面**：
+  - Compose 国际版: http://localhost:9000
+  - Compose 中国版: http://localhost:8000
+  - docker run 映射 8080 时: http://localhost:8080
 - **默认管理员账号**：
   - 用户名：`admin`
   - 密码：`admin123`
-- **API文档**：http://localhost:8090/docs
-- **健康检查**：http://localhost:8090/health
+- **API文档**：
+  - Compose 国际版: http://localhost:9000/docs
+  - Compose 中国版: http://localhost:8000/docs
+- **健康检查**：
+  - Compose 国际版: http://localhost:9000/health
+  - Compose 中国版: http://localhost:8000/health
 
 > ⚠️ **安全提示**：首次登录后请立即修改默认密码！
 
@@ -831,7 +838,7 @@ docker rmi $(docker images --filter "reference=*xianyu-auto-reply*" -q)
 docker pull registry.cn-shanghai.aliyuncs.com/zhinian-software/xianyu-auto-reply:latest
 
 # 4. 启动新容器
-docker run -d -p 8080:8080 --restart always \
+docker run -d -p 8080:8090 --restart always \
   -v $PWD/xianyu-auto-reply/:/app/data/ \
   --name xianyu-auto-reply \
   registry.cn-shanghai.aliyuncs.com/zhinian-software/xianyu-auto-reply:latest
@@ -850,7 +857,7 @@ docker rmi $(docker images --filter "reference=*xianyu-auto-reply*" -q)
 docker pull zhinianblog/xianyu-auto-reply:latest
 
 # 4. 启动新容器
-docker run -d -p 8080:8080 --restart always \
+docker run -d -p 8080:8090 --restart always \
   -v $PWD/xianyu-auto-reply/:/app/data/ \
   --name xianyu-auto-reply \
   zhinianblog/xianyu-auto-reply:latest
@@ -964,9 +971,9 @@ bash docker-deploy.sh
 
 ```bash
 # 确保entrypoint.sh文件存在并重新构建
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+docker compose down
+docker compose build --no-cache
+docker compose up -d
 ```
 
 ### 6. 预构建镜像拉取失败

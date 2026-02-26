@@ -111,11 +111,11 @@ RUN echo "ulimit -c 0" >> /etc/profile
 # 在生产环境中，建议配置适当的用户映射
 
 # 暴露端口
-EXPOSE 8080
+EXPOSE 8090
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:8090/health || exit 1
 
 # 复制启动脚本
 # 复制启动脚本和调试工具
