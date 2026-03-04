@@ -322,9 +322,9 @@
               </h5>
               <div class="time-range-selector">
                 <div class="btn-group" role="group">
-                  <button type="button" class="btn btn-sm btn-primary" onclick="loadSalesChart('week')">最近1周</button>
-                  <button type="button" class="btn btn-sm btn-primary" onclick="loadSalesChart('month')">最近1月</button>
-                  <button type="button" class="btn btn-sm btn-primary" onclick="toggleDateRangePicker()">自定义</button>
+                  <button type="button" class="btn btn-sm btn-primary" data-period="week" onclick="loadSalesChart('week')">最近1周</button>
+                  <button type="button" class="btn btn-sm btn-primary" data-period="month" onclick="loadSalesChart('month')">最近1月</button>
+                  <button type="button" class="btn btn-sm btn-primary" data-period="custom" onclick="toggleDateRangePicker()">自定义</button>
                 </div>
                 <div id="dateRangePicker" class="date-range-picker mt-2" style="display: none;">
                   <div class="input-group input-group-sm">

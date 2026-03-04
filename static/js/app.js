@@ -538,12 +538,7 @@ function hideChartLoading() {
 function updateChartButtonState(activePeriod) {
     const buttons = document.querySelectorAll('.time-range-selector .btn-group .btn');
     buttons.forEach(btn => {
-        const btnText = btn.textContent.trim();
-        let btnPeriod = null;
-        
-        if (btnText === '最近1周') btnPeriod = 'week';
-        else if (btnText === '最近1月') btnPeriod = 'month';
-        else if (btnText === '自定义') btnPeriod = 'custom';
+        const btnPeriod = btn.dataset.period;
         
         if (btnPeriod === activePeriod) {
             btn.classList.remove('btn-outline-primary');
