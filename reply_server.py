@@ -1188,6 +1188,162 @@ async def logout(credentials: Optional[HTTPAuthorizationCredentials] = Depends(s
     return {"message": "已登出"}
 
 
+# 销售额数据查询接口
+@app.get('/api/sales')
+async def get_sales_data(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user_info: Optional[Dict[str, Any]] = Depends(verify_token)
+):
+    """
+    获取销售额数据
+    - start_date: 开始日期 (格式: YYYY-MM-DD)
+    - end_date: 结束日期 (格式: YYYY-MM-DD)
+    """
+    try:
+        from db_manager import db_manager
+        
+        # 构建查询
+        query = "SELECT amount, created_at FROM orders WHERE 1=1"
+        params = []
+        
+        if start_date:
+            query += " AND created_at >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND created_at <= ?"
+            params.append(end_date + " 23:59:59")
+        
+        # 执行查询
+        orders = db_manager.execute_query(query, params)
+        
+        # 处理数据
+        sales_by_date = {}
+        total_sales = 0.0
+        valid_count = 0
+        
+        for order in orders:
+            amount_str = order[0]
+            created_at = order[1]
+            
+            # 解析金额
+            try:
+                # 移除货币符号和逗号
+                amount_clean = amount_str.replace('￥', '').replace(',', '')
+                amount = float(amount_clean)
+                total_sales += amount
+                valid_count += 1
+                
+                # 格式化为日期
+                date = created_at.split(' ')[0] if ' ' in created_at else created_at
+                
+                # 直接按日期分组
+                if date not in sales_by_date:
+                    sales_by_date[date] = 0
+                sales_by_date[date] += amount
+            except (ValueError, TypeError):
+                # 跳过无效金额
+                continue
+        
+        # 转换为列表格式
+        formatted_data = [
+            {
+                'date': date,
+                'amount': round(amount, 2)
+            }
+            for date, amount in sorted(sales_by_date.items())
+        ]
+        
+        return {
+            'success': True,
+            'data': {
+                'sales': formatted_data,
+                'total': round(total_sales, 2),
+                'count': valid_count
+            },
+            'message': '获取销售额数据成功'
+        }
+        
+    except Exception as e:
+        logger.error(f"获取销售额数据失败: {e}")
+        return {
+            'success': False,
+            'data': None,
+            'message': f'获取销售额数据失败: {str(e)}'
+        }
+
+
+# 周销售额和月销售额查询接口
+@app.get('/api/sales/summary')
+async def get_sales_summary(
+    user_info: Optional[Dict[str, Any]] = Depends(verify_token)
+):
+    """
+    获取本周和本月销售额摘要
+    """
+    try:
+        from db_manager import db_manager
+        from datetime import datetime, timedelta
+        
+        # 计算时间范围
+        now = datetime.now()
+        
+        # 本周开始（周一）
+        week_start = now - timedelta(days=now.weekday())
+        week_start_str = week_start.strftime('%Y-%m-%d')
+        
+        # 本月开始
+        month_start = now.replace(day=1)
+        month_start_str = month_start.strftime('%Y-%m-%d')
+        
+        # 单次查询获取所有数据，减少数据库访问
+        query = "SELECT amount, created_at FROM orders WHERE created_at >= ?"
+        all_orders = db_manager.execute_query(query, [month_start_str])
+        
+        # 计算销售额
+        week_sales = 0.0
+        month_sales = 0.0
+        
+        for order in all_orders:
+            amount_str = order[0]
+            created_at = order[1]
+            
+            try:
+                amount_clean = amount_str.replace('￥', '').replace(',', '')
+                amount = float(amount_clean)
+                
+                # 检查是否在本月
+                if created_at >= month_start_str:
+                    month_sales += amount
+                
+                # 检查是否在本周
+                if created_at >= week_start_str:
+                    week_sales += amount
+            except (ValueError, TypeError):
+                continue
+        
+        week_sales = round(week_sales, 2)
+        month_sales = round(month_sales, 2)
+        
+        return {
+            'success': True,
+            'data': {
+                'week_sales': week_sales,
+                'month_sales': month_sales,
+                'update_time': now.strftime('%Y-%m-%d %H:%M:%S')
+            },
+            'message': '获取销售额摘要成功'
+        }
+        
+    except Exception as e:
+        logger.error(f"获取销售额摘要失败: {e}")
+        return {
+            'success': False,
+            'data': None,
+            'message': f'获取销售额摘要失败: {str(e)}'
+        }
+
+
 # ========================= 防暴力破解管理API =========================
 
 @app.get('/admin/security/login-stats')

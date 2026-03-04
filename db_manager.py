@@ -1589,6 +1589,20 @@ Cookie数量: {cookie_count}
         self._log_sql(sql, f"批量执行 {len(params_list)} 条记录", "EXECUTEMANY")
         return cursor.executemany(sql, params_list)
     
+    def execute_query(self, sql: str, params: tuple = None):
+        """执行查询并返回结果"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                return cursor.fetchall()
+            except Exception as e:
+                logger.error(f"执行查询失败: {e}")
+                raise
+    
     # -------------------- Cookie操作 --------------------
     def save_cookie(self, cookie_id: str, cookie_value: str, user_id: int = None) -> bool:
         """保存Cookie到数据库，如存在则更新"""

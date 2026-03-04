@@ -51,6 +51,7 @@
   <link rel="stylesheet" href="/static/lib/bootstrap-icons/bootstrap-icons.css">
 
   <link rel="stylesheet" href="/static/css/app.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <!-- 移动端菜单切换按钮 -->
@@ -285,6 +286,60 @@
                 <div class="order-kpi-label">当日订单数</div>
                 <div class="order-kpi-value" id="dashboardTodayOrders">0</div>
               </div>
+            </div>
+            
+            <!-- 销售额数据展示模块 -->
+            <div class="sales-summary-section mt-4">
+              <h6 class="mb-3">
+                <i class="bi bi-cash-coin me-1"></i>
+                销售额统计
+              </h6>
+              <div class="sales-kpi-grid">
+                <div class="sales-kpi-item">
+                  <div class="sales-kpi-label">本周销售额</div>
+                  <div class="sales-kpi-value" id="dashboardWeekSales">￥0.00</div>
+                </div>
+                <div class="sales-kpi-item">
+                  <div class="sales-kpi-label">本月销售额</div>
+                  <div class="sales-kpi-value" id="dashboardMonthSales">￥0.00</div>
+                </div>
+                <div class="sales-kpi-item">
+                  <div class="sales-kpi-label">更新时间</div>
+                  <div class="sales-kpi-value" id="dashboardSalesUpdateTime">--</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- 销售额折线图 -->
+        <div class="card mb-4">
+          <div class="card-header">
+            <div class="d-flex justify-content-between align-items-center">
+              <h5 class="mb-0">
+                <i class="bi bi-line-chart me-2"></i>
+                销售额趋势
+              </h5>
+              <div class="time-range-selector">
+                <div class="btn-group" role="group">
+                  <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadSalesChart('week')">最近1周</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadSalesChart('month')">最近1月</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleDateRangePicker()">自定义</button>
+                </div>
+                <div id="dateRangePicker" class="date-range-picker mt-2" style="display: none;">
+                  <div class="input-group input-group-sm">
+                    <input type="date" class="form-control" id="startDate">
+                    <span class="input-group-text">至</span>
+                    <input type="date" class="form-control" id="endDate">
+                    <button class="btn btn-sm btn-primary" onclick="loadCustomSalesChart()">查询</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="chart-container" style="height: 300px;">
+              <canvas id="salesChart"></canvas>
             </div>
           </div>
         </div>

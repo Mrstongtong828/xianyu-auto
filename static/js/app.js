@@ -354,6 +354,12 @@ async function loadDashboard() {
         // 加载订单看板数据
         const orderMetrics = await loadOrderDashboardMetrics();
 
+        // 加载销售额摘要数据
+        await loadSalesSummary();
+
+        // 加载销售额图表数据（默认显示最近1周）
+        await loadSalesChart('week');
+
         // 更新仪表盘显示
         updateDashboardStats(accountsWithKeywords.length, totalKeywords, enabledAccounts, totalItems);
         updateDashboardAccountsList(accountsWithKeywords);
@@ -451,6 +457,204 @@ async function loadOrderDashboardMetrics() {
         console.error('加载订单数量失败:', error);
         updateDashboardOrderMetrics(defaultMetrics);
         return defaultMetrics;
+    }
+}
+
+// 加载销售额摘要数据
+async function loadSalesSummary() {
+    try {
+        const token = localStorage.getItem('auth_token');
+        const response = await fetch('/api/sales/summary', {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        const data = await response.json();
+        if (data.success && data.data) {
+            updateDashboardSalesMetrics(data.data);
+        }
+    } catch (error) {
+        console.error('加载销售额摘要失败:', error);
+    }
+}
+
+// 更新销售额指标
+function updateDashboardSalesMetrics(metrics) {
+    const weekSalesEl = document.getElementById('dashboardWeekSales');
+    const monthSalesEl = document.getElementById('dashboardMonthSales');
+    const updateTimeEl = document.getElementById('dashboardSalesUpdateTime');
+
+    if (weekSalesEl) {
+        weekSalesEl.textContent = `￥${metrics.week_sales.toFixed(2)}`;
+    }
+
+    if (monthSalesEl) {
+        monthSalesEl.textContent = `￥${metrics.month_sales.toFixed(2)}`;
+    }
+
+    if (updateTimeEl) {
+        updateTimeEl.textContent = metrics.update_time;
+    }
+}
+
+// 销售额图表实例
+let salesChartInstance = null;
+
+// 加载销售额图表数据
+async function loadSalesChart(period) {
+    try {
+        const token = localStorage.getItem('auth_token');
+        let startDate, endDate;
+        const now = new Date();
+
+        if (period === 'week') {
+            startDate = new Date(now);
+            startDate.setDate(now.getDate() - 6);
+        } else if (period === 'month') {
+            startDate = new Date(now);
+            startDate.setMonth(now.getMonth() - 1);
+        }
+
+        const startDateStr = startDate.toISOString().split('T')[0];
+        const endDateStr = now.toISOString().split('T')[0];
+
+        const response = await fetch(`/api/sales?start_date=${startDateStr}&end_date=${endDateStr}`, {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        const data = await response.json();
+        if (data.success && data.data) {
+            renderSalesChart(data.data.sales, period);
+        }
+    } catch (error) {
+        console.error('加载销售额图表数据失败:', error);
+    }
+}
+
+// 加载自定义日期范围的销售额数据
+async function loadCustomSalesChart() {
+    const startDate = document.getElementById('startDate').value;
+    const endDate = document.getElementById('endDate').value;
+
+    if (!startDate || !endDate) {
+        showToast('请选择开始和结束日期', 'warning');
+        return;
+    }
+
+    try {
+        const token = localStorage.getItem('auth_token');
+        const response = await fetch(`/api/sales?start_date=${startDate}&end_date=${endDate}`, {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        const data = await response.json();
+        if (data.success && data.data) {
+            renderSalesChart(data.data.sales, 'custom');
+        }
+    } catch (error) {
+        console.error('加载自定义销售额数据失败:', error);
+    }
+}
+
+// 切换日期选择器显示
+function toggleDateRangePicker() {
+    const dateRangePicker = document.getElementById('dateRangePicker');
+    dateRangePicker.style.display = dateRangePicker.style.display === 'none' ? 'block' : 'none';
+}
+
+// 渲染销售额图表
+function renderSalesChart(salesData, period) {
+    const ctx = document.getElementById('salesChart').getContext('2d');
+    
+    // 准备数据
+    const labels = salesData.map(item => item.date);
+    const data = salesData.map(item => item.amount);
+
+    // 销毁现有图表
+    if (salesChartInstance) {
+        salesChartInstance.destroy();
+    }
+
+    // 创建新图表
+    salesChartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: '销售额',
+                data: data,
+                borderColor: '#007bff',
+                backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                borderWidth: 2,
+                tension: 0.3,
+                fill: true,
+                pointBackgroundColor: '#007bff',
+                pointBorderColor: '#fff',
+                pointBorderWidth: 2,
+                pointRadius: 4,
+                pointHoverRadius: 6
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    callbacks: {
+                        label: function(context) {
+                            return `销售额: ￥${context.parsed.y.toFixed(2)}`;
+                        }
+                    }
+                },
+                title: {
+                    display: true,
+                    text: getChartTitle(period)
+                }
+            },
+            scales: {
+                x: {
+                    display: true,
+                    title: {
+                        display: true,
+                        text: '日期'
+                    }
+                },
+                y: {
+                    display: true,
+                    title: {
+                        display: true,
+                        text: '销售额 (￥)'
+                    },
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) {
+                            return '￥' + value;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+// 获取图表标题
+function getChartTitle(period) {
+    if (period === 'week') {
+        return '最近1周销售额趋势';
+    } else if (period === 'month') {
+        return '最近1月销售额趋势';
+    } else {
+        return '自定义时间范围销售额趋势';
     }
 }
 
