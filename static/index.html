@@ -2128,18 +2128,18 @@
               <div class="col-md-3">
                 <label class="form-label">处理状态</label>
                 <div class="d-flex gap-2 flex-wrap">
-                  <span class="badge bg-secondary filter-badge active" data-status="" onclick="filterRiskLogsByStatus('')">
+                  <button type="button" class="badge bg-secondary filter-badge active border-0" data-status="" onclick="filterRiskLogsByStatus('')">
                     全部
-                  </span>
-                  <span class="badge bg-warning filter-badge" data-status="processing" onclick="filterRiskLogsByStatus('processing')">
+                  </button>
+                  <button type="button" class="badge bg-warning filter-badge border-0" data-status="processing" onclick="filterRiskLogsByStatus('processing')">
                     处理中
-                  </span>
-                  <span class="badge bg-success filter-badge" data-status="success" onclick="filterRiskLogsByStatus('success')">
+                  </button>
+                  <button type="button" class="badge bg-success filter-badge border-0" data-status="success" onclick="filterRiskLogsByStatus('success')">
                     成功
-                  </span>
-                  <span class="badge bg-danger filter-badge" data-status="failed" onclick="filterRiskLogsByStatus('failed')">
+                  </button>
+                  <button type="button" class="badge bg-danger filter-badge border-0" data-status="failed" onclick="filterRiskLogsByStatus('failed')">
                     失败
-                  </span>
+                  </button>
                 </div>
               </div>
               <div class="col-md-2">
@@ -2161,8 +2161,8 @@
               <i class="bi bi-list-ul me-2"></i>
               风控日志记录
             </h5>
-            <div class="d-flex gap-2">
-              <span id="riskLogCount" class="badge bg-info">总计: 0 条</span>
+            <div class="d-flex gap-2 align-items-center">
+              <span id="riskLogCount" class="badge bg-info toolbar-count-badge">记录数: 0 条</span>
               <button class="btn btn-sm btn-outline-danger" onclick="clearRiskControlLogs()" title="清空日志">
                 <i class="bi bi-trash"></i> 清空
               </button>

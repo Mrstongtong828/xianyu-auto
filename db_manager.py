@@ -815,7 +815,7 @@ Cookie数量: {cookie_count}
             ('smtp_port', '587', 'SMTP端口'),
             ('smtp_user', '', 'SMTP登录用户名（发件邮箱）'),
             ('smtp_password', '', 'SMTP登录密码/授权码'),
-            ('smtp_from', '', '发件人显示名（留空则使用用户名）'),
+            ('smtp_from', '', '发件人显示名（留空则使用邮箱地址）'),
             ('smtp_use_tls', 'true', '是否启用TLS'),
             ('smtp_use_ssl', 'false', '是否启用SSL'),
             ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥')
@@ -3995,13 +3995,13 @@ Cookie数量: {cookie_count}
     async def send_verification_email(self, email: str, code: str) -> bool:
         """发送验证码邮件（支持SMTP和API两种方式）"""
         try:
-            subject = "闲鱼自动回复系统 - 邮箱验证码"
+            subject = "闲鱼管理系统 - 邮箱验证码"
             # 使用简单的纯文本邮件内容
-            text_content = f"""【闲鱼自动回复系统】邮箱验证码
+            text_content = f"""【闲鱼管理系统】邮箱验证码
 
 您好！
 
-感谢您使用闲鱼自动回复系统。为了确保账户安全，请使用以下验证码完成邮箱验证：
+感谢您使用闲鱼管理系统。为了确保账户安全，请使用以下验证码完成邮箱验证：
 
 验证码：{code}
 
@@ -4011,12 +4011,11 @@ Cookie数量: {cookie_count}
 • 如非本人操作，请忽略此邮件
 • 系统不会主动索要您的验证码
 
-如果您在使用过程中遇到任何问题，请联系我们的技术支持团队。
-感谢您选择闲鱼自动回复系统！
+感谢您选择闲鱼管理系统！
 
 ---
 此邮件由系统自动发送，请勿直接回复
-© 2025 闲鱼自动回复系统"""
+© 2026 闲鱼管理系统"""
 
             # 从系统设置读取SMTP配置
             try:
@@ -7672,12 +7671,14 @@ Cookie数量: {cookie_count}
             logger.error(f"更新风控日志失败: {e}")
             return False
 
-    def get_risk_control_logs(self, cookie_id: str = None, limit: int = 100, offset: int = 0) -> List[Dict]:
+    def get_risk_control_logs(self, cookie_id: str = None, processing_status: str = None,
+                              limit: int = 100, offset: int = 0) -> List[Dict]:
         """
         获取风控日志列表
 
         Args:
             cookie_id: Cookie ID，为None时获取所有日志
+            processing_status: 处理状态，为None时不过滤状态
             limit: 限制返回数量
             offset: 偏移量
 
@@ -7688,23 +7689,28 @@ Cookie数量: {cookie_count}
             with self.lock:
                 cursor = self.conn.cursor()
 
+                query = '''
+                    SELECT r.*, c.id as cookie_name
+                    FROM risk_control_logs r
+                    LEFT JOIN cookies c ON r.cookie_id = c.id
+                '''
+                conditions = []
+                params = []
+
                 if cookie_id:
-                    cursor.execute('''
-                        SELECT r.*, c.id as cookie_name
-                        FROM risk_control_logs r
-                        LEFT JOIN cookies c ON r.cookie_id = c.id
-                        WHERE r.cookie_id = ?
-                        ORDER BY r.created_at DESC
-                        LIMIT ? OFFSET ?
-                    ''', (cookie_id, limit, offset))
-                else:
-                    cursor.execute('''
-                        SELECT r.*, c.id as cookie_name
-                        FROM risk_control_logs r
-                        LEFT JOIN cookies c ON r.cookie_id = c.id
-                        ORDER BY r.created_at DESC
-                        LIMIT ? OFFSET ?
-                    ''', (limit, offset))
+                    conditions.append('r.cookie_id = ?')
+                    params.append(cookie_id)
+
+                if processing_status:
+                    conditions.append('r.processing_status = ?')
+                    params.append(processing_status)
+
+                if conditions:
+                    query += ' WHERE ' + ' AND '.join(conditions)
+
+                query += ' ORDER BY r.created_at DESC LIMIT ? OFFSET ?'
+                params.extend([limit, offset])
+                cursor.execute(query, params)
 
                 columns = [description[0] for description in cursor.description]
                 logs = []
@@ -7718,12 +7724,13 @@ Cookie数量: {cookie_count}
             logger.error(f"获取风控日志失败: {e}")
             return []
 
-    def get_risk_control_logs_count(self, cookie_id: str = None) -> int:
+    def get_risk_control_logs_count(self, cookie_id: str = None, processing_status: str = None) -> int:
         """
         获取风控日志总数
 
         Args:
             cookie_id: Cookie ID，为None时获取所有日志数量
+            processing_status: 处理状态，为None时不过滤状态
 
         Returns:
             int: 日志总数
@@ -7732,10 +7739,22 @@ Cookie数量: {cookie_count}
             with self.lock:
                 cursor = self.conn.cursor()
 
+                query = 'SELECT COUNT(*) FROM risk_control_logs'
+                conditions = []
+                params = []
+
                 if cookie_id:
-                    cursor.execute('SELECT COUNT(*) FROM risk_control_logs WHERE cookie_id = ?', (cookie_id,))
-                else:
-                    cursor.execute('SELECT COUNT(*) FROM risk_control_logs')
+                    conditions.append('cookie_id = ?')
+                    params.append(cookie_id)
+
+                if processing_status:
+                    conditions.append('processing_status = ?')
+                    params.append(processing_status)
+
+                if conditions:
+                    query += ' WHERE ' + ' AND '.join(conditions)
+
+                cursor.execute(query, params)
 
                 return cursor.fetchone()[0]
         except Exception as e:

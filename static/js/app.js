@@ -4607,7 +4607,7 @@ const outgoingConfigs = {
                 id: 'smtp_from',
                 label: '发件人显示名（可选）',
                 type: 'text',
-                placeholder: '闲鱼自动回复系统',
+                placeholder: '闲鱼管理系统',
                 required: false,
                 help: '邮件发件人显示的名称，留空则使用邮箱地址'
             },
@@ -4733,7 +4733,7 @@ const channelTypeConfigs = {
         id: 'title',
         label: '通知标题（可选）',
         type: 'text',
-        placeholder: '闲鱼自动回复通知',
+        placeholder: '闲鱼管理系统通知',
         required: false,
         help: '推送通知的标题'
         },
@@ -4898,7 +4898,7 @@ function showAddChannelModal(type) {
     fieldsContainer.innerHTML = '';
 
     config.fields.forEach(field => {
-    const fieldHtml = generateFieldHtml(field, '');
+    const fieldHtml = generateFieldHtml(field, 'add_');
     fieldsContainer.insertAdjacentHTML('beforeend', fieldHtml);
     });
 
@@ -4945,6 +4945,7 @@ async function saveNotificationChannel() {
     const type = document.getElementById('channelType').value;
     const name = document.getElementById('channelName').value;
     const enabled = document.getElementById('channelEnabled').checked;
+    const form = document.getElementById('addChannelForm');
 
     if (!name.trim()) {
     showToast('请输入渠道名称', 'warning');
@@ -4962,7 +4963,12 @@ async function saveNotificationChannel() {
     let hasError = false;
 
     config.fields.forEach(field => {
-    const element = document.getElementById(field.id);
+    const element = form ? form.querySelector(`#add_${field.id}`) : null;
+    if (!element) {
+        showToast(`找不到${field.label}输入框`, 'danger');
+        hasError = true;
+        return;
+    }
     const value = element.value.trim();
 
     if (field.required && !value) {
@@ -14143,11 +14149,72 @@ let currentRiskLogStatus = '';
 let currentRiskLogOffset = 0;
 const riskLogLimit = 100;
 
+async function fetchRiskControlLogsPage(token, { cookieId = '', processingStatus = '', limit = 100, offset = 0 } = {}) {
+    let url = `/admin/risk-control-logs?limit=${limit}&offset=${offset}`;
+    if (cookieId) {
+        url += `&cookie_id=${encodeURIComponent(cookieId)}`;
+    }
+    if (processingStatus) {
+        url += `&processing_status=${encodeURIComponent(processingStatus)}`;
+    }
+
+    const response = await fetch(url, {
+        headers: {
+            'Authorization': `Bearer ${token}`
+        }
+    });
+
+    return response.json();
+}
+
+function needsClientSideRiskLogFilter(logs, processingStatus) {
+    if (!processingStatus || !Array.isArray(logs) || logs.length === 0) {
+        return false;
+    }
+
+    return logs.some(log => String(log.processing_status || '') !== processingStatus);
+}
+
+async function fetchRiskControlLogsWithClientFilter(token, { cookieId = '', processingStatus = '', limit = 100, offset = 0 } = {}) {
+    const batchSize = 500;
+    let fetchOffset = 0;
+    let total = 0;
+    const matchedLogs = [];
+
+    while (true) {
+        const pageData = await fetchRiskControlLogsPage(token, {
+            cookieId,
+            limit: batchSize,
+            offset: fetchOffset
+        });
+
+        const pageLogs = Array.isArray(pageData.data) ? pageData.data : [];
+        total = pageData.total || total || pageLogs.length;
+
+        matchedLogs.push(...pageLogs.filter(log => String(log.processing_status || '') === processingStatus));
+
+        fetchOffset += pageLogs.length;
+        if (pageLogs.length === 0 || fetchOffset >= total) {
+            break;
+        }
+    }
+
+    return {
+        success: true,
+        data: matchedLogs.slice(offset, offset + limit),
+        total: matchedLogs.length,
+        limit,
+        offset,
+        filter_mode: 'client'
+    };
+}
+
 // 加载风控日志
 async function loadRiskControlLogs(offset = 0) {
     const token = localStorage.getItem('auth_token');
     const cookieId = document.getElementById('riskLogCookieFilter').value;
-    const limit = document.getElementById('riskLogLimit').value;
+    const limit = parseInt(document.getElementById('riskLogLimit').value, 10) || 100;
+    currentRiskLogOffset = offset;
 
     const loadingDiv = document.getElementById('loadingRiskLogs');
     const logContainer = document.getElementById('riskLogContainer');
@@ -14157,19 +14224,23 @@ async function loadRiskControlLogs(offset = 0) {
     logContainer.style.display = 'none';
     noLogsDiv.style.display = 'none';
 
-    let url = `/admin/risk-control-logs?limit=${limit}&offset=${offset}`;
-    if (cookieId) {
-        url += `&cookie_id=${cookieId}`;
-    }
-
     try {
-        const response = await fetch(url, {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
+        let data = await fetchRiskControlLogsPage(token, {
+            cookieId,
+            processingStatus: currentRiskLogStatus,
+            limit,
+            offset
         });
 
-        const data = await response.json();
+        if (needsClientSideRiskLogFilter(data.data, currentRiskLogStatus)) {
+            data = await fetchRiskControlLogsWithClientFilter(token, {
+                cookieId,
+                processingStatus: currentRiskLogStatus,
+                limit,
+                offset
+            });
+        }
+
         loadingDiv.style.display = 'none';
 
         if (data.success && data.data && data.data.length > 0) {
@@ -14180,13 +14251,22 @@ async function loadRiskControlLogs(offset = 0) {
         } else {
             noLogsDiv.style.display = 'block';
             updateRiskLogInfo({total: 0, data: []});
+            updateRiskLogPagination({total: 0});
         }
 
-        currentRiskLogOffset = offset;
     } catch (error) {
         console.error('加载风控日志失败:', error);
         loadingDiv.style.display = 'none';
         noLogsDiv.style.display = 'block';
+        updateRiskLogPagination({total: 0});
+        const countElement = document.getElementById('riskLogCount');
+        const paginationInfo = document.getElementById('riskLogPaginationInfo');
+        if (countElement) {
+            countElement.textContent = '加载失败';
+        }
+        if (paginationInfo) {
+            paginationInfo.textContent = '风控日志加载失败，请重试';
+        }
         showToast('加载风控日志失败', 'danger');
     }
 }
@@ -14252,15 +14332,26 @@ function displayRiskControlLogs(logs) {
 function updateRiskLogInfo(data) {
     const countElement = document.getElementById('riskLogCount');
     const paginationInfo = document.getElementById('riskLogPaginationInfo');
+    const cookieId = document.getElementById('riskLogCookieFilter')?.value;
+    const hasFilters = Boolean(cookieId || currentRiskLogStatus);
+    const total = data.total || 0;
+    const currentCount = data.data ? data.data.length : 0;
 
     if (countElement) {
-        countElement.textContent = `总计: ${data.total || 0} 条`;
+        countElement.textContent = hasFilters ? `筛选结果: ${total} 条` : `总计: ${total} 条`;
     }
 
     if (paginationInfo) {
+        if (currentCount === 0 || total === 0) {
+            paginationInfo.textContent = hasFilters ? `显示第 0-0 条，匹配 0 条记录` : '显示第 0-0 条，共 0 条记录';
+            return;
+        }
+
         const start = currentRiskLogOffset + 1;
-        const end = Math.min(currentRiskLogOffset + (data.data ? data.data.length : 0), data.total || 0);
-        paginationInfo.textContent = `显示第 ${start}-${end} 条，共 ${data.total || 0} 条记录`;
+        const end = Math.min(currentRiskLogOffset + currentCount, total);
+        paginationInfo.textContent = hasFilters
+            ? `显示第 ${start}-${end} 条，匹配 ${total} 条记录`
+            : `显示第 ${start}-${end} 条，共 ${total} 条记录`;
     }
 }
 
@@ -14308,7 +14399,10 @@ function filterRiskLogsByStatus(status) {
     document.querySelectorAll('.filter-badge[data-status]').forEach(badge => {
         badge.classList.remove('active');
     });
-    document.querySelector(`.filter-badge[data-status="${status}"]`).classList.add('active');
+    const activeBadge = document.querySelector(`.filter-badge[data-status="${status}"]`);
+    if (activeBadge) {
+        activeBadge.classList.add('active');
+    }
 
     // 重新加载日志
     loadRiskControlLogs(0);
@@ -15001,9 +15095,20 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.5.9',
+    version: 'v1.6.0',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.6.0',
+            date: '2026-03-12',
+            updates: [
+                '【修复】通知渠道邮件表单使用独立字段标识，避免与系统 SMTP 配置冲突后保存时误提示“请填写SMTP服务器”',
+                '【优化】通知渠道邮件标题与正文抬头统一为“闲鱼管理系统通知”，并精简验证码邮件文案',
+                '【优化】系统品牌文案统一调整为“闲鱼管理系统”，同步更新登录页、注册页、浏览器标题、API 文档与统计服务说明',
+                '【修复】风控日志记录数徽标文字垂直居中，处理状态筛选恢复可用，筛选结果与条数统计保持一致',
+                '【优化】风控验证通知文案调整为“自动回复功能暂时无法使用”，避免系统名与功能名混淆'
+            ]
+        },
         {
             version: 'v1.5.9',
             date: '2026-03-11',
@@ -15382,7 +15487,7 @@ const LOCAL_VERSION_HISTORY = {
             version: 'v1.0.0',
             date: '2026-01-24',
             updates: [
-                '闲鱼自动回复系统初始版本'
+                '闲鱼管理系统初始版本'
             ]
         }
     ]
@@ -16288,7 +16393,7 @@ async function showVersionInfo(version) {
                         <div class="text-center mt-4">
                             <small style="color: #888; font-size: 14px;">
                                 <i class="bi bi-github me-1"></i>
-                                闲鱼自动回复助手 | 让客服工作更轻松
+                                闲鱼管理系统 | 让店铺管理更轻松
                             </small>
                         </div>
                     </div>

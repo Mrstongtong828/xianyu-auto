@@ -5837,7 +5837,7 @@ Cookie数量: {cookie_count}
             data = {
                 "msgtype": "markdown",
                 "markdown": {
-                    "title": "闲鱼自动回复通知",
+                    "title": "闲鱼管理系统通知",
                     "text": message
                 }
             }
@@ -5939,7 +5939,7 @@ Cookie数量: {cookie_count}
             # 解析配置
             server_url = config_data.get('server_url', 'https://api.day.app').rstrip('/')
             device_key = config_data.get('device_key', '')
-            title = config_data.get('title', '闲鱼自动回复通知')
+            title = config_data.get('title', '闲鱼管理系统通知')
             sound = config_data.get('sound', 'default')
             icon = config_data.get('icon', '')
             group = config_data.get('group', 'xianyu')
@@ -6036,7 +6036,7 @@ Cookie数量: {cookie_count}
             msg = MIMEMultipart()
             msg['From'] = email_user
             msg['To'] = recipient_email
-            msg['Subject'] = "闲鱼自动回复通知"
+            msg['Subject'] = "闲鱼管理系统通知"
 
             # 添加邮件正文
             msg.attach(MIMEText(message, 'plain', 'utf-8'))

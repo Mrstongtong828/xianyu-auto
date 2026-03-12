@@ -702,9 +702,9 @@ class ResponseModel(BaseModel):
 
 
 app = FastAPI(
-    title="Xianyu Auto Reply API",
+    title="Xianyu Management API",
     version="1.0.0",
-    description="闲鱼自动回复系统API",
+    description="闲鱼管理系统API",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -6578,17 +6578,26 @@ async def get_logs(lines: int = 200, level: str = None, source: str = None, curr
 @app.get("/risk-control-logs")
 async def get_risk_control_logs(
     cookie_id: str = None,
+    processing_status: str = None,
     limit: int = 100,
     offset: int = 0,
     admin_user: Dict[str, Any] = Depends(require_admin)
 ):
     """获取风控日志（管理员专用）"""
     try:
-        log_with_user('info', f"查询风控日志: cookie_id={cookie_id}, limit={limit}, offset={offset}", admin_user)
+        log_with_user('info', f"查询风控日志: cookie_id={cookie_id}, processing_status={processing_status}, limit={limit}, offset={offset}", admin_user)
 
         # 获取风控日志
-        logs = db_manager.get_risk_control_logs(cookie_id=cookie_id, limit=limit, offset=offset)
-        total_count = db_manager.get_risk_control_logs_count(cookie_id=cookie_id)
+        logs = db_manager.get_risk_control_logs(
+            cookie_id=cookie_id,
+            processing_status=processing_status,
+            limit=limit,
+            offset=offset
+        )
+        total_count = db_manager.get_risk_control_logs_count(
+            cookie_id=cookie_id,
+            processing_status=processing_status
+        )
 
         log_with_user('info', f"风控日志查询成功，共 {len(logs)} 条记录，总计 {total_count} 条", admin_user)
 
@@ -6926,17 +6935,26 @@ def update_user_admin_status(user_id: int, is_admin: bool, admin_user: Dict[str,
 @app.get('/admin/risk-control-logs')
 async def get_admin_risk_control_logs(
     cookie_id: str = None,
+    processing_status: str = None,
     limit: int = 100,
     offset: int = 0,
     admin_user: Dict[str, Any] = Depends(require_admin)
 ):
     """获取风控日志（管理员专用）"""
     try:
-        log_with_user('info', f"查询风控日志: cookie_id={cookie_id}, limit={limit}, offset={offset}", admin_user)
+        log_with_user('info', f"查询风控日志: cookie_id={cookie_id}, processing_status={processing_status}, limit={limit}, offset={offset}", admin_user)
 
         # 获取风控日志
-        logs = db_manager.get_risk_control_logs(cookie_id=cookie_id, limit=limit, offset=offset)
-        total_count = db_manager.get_risk_control_logs_count(cookie_id=cookie_id)
+        logs = db_manager.get_risk_control_logs(
+            cookie_id=cookie_id,
+            processing_status=processing_status,
+            limit=limit,
+            offset=offset
+        )
+        total_count = db_manager.get_risk_control_logs_count(
+            cookie_id=cookie_id,
+            processing_status=processing_status
+        )
 
         log_with_user('info', f"风控日志查询成功，共 {len(logs)} 条记录，总计 {total_count} 条", admin_user)
 

@@ -1,4 +1,4 @@
-# 🐟 闲鱼自动回复系统
+# 🐟 闲鱼管理系统
 
 
 [![GitHub](https://img.shields.io/badge/GitHub-GuDong2003%2Fxianyu--auto--reply--fix-blue?logo=github)](https://github.com/GuDong2003/xianyu-auto-reply-fix)
@@ -14,7 +14,7 @@
 
 ## 📋 项目概述
 
-一个功能完整的闲鱼自动回复和管理系统，采用现代化的技术架构，支持多用户、多账号管理，具备智能回复、自动发货、自动确认发货、商品管理等企业级功能。系统基于Python异步编程，使用FastAPI提供RESTful API，SQLite数据库存储，支持Docker一键部署。
+一个功能完整的闲鱼管理系统，采用现代化的技术架构，支持多用户、多账号管理，具备智能回复、自动发货、自动确认发货、商品管理等企业级功能。系统基于Python异步编程，使用FastAPI提供RESTful API，SQLite数据库存储，支持Docker一键部署。
 
 > **⚠️ 重要提示：本项目仅供学习研究使用，严禁商业用途！使用前请仔细阅读[版权声明](#️-版权声明与使用条款)。**
 
