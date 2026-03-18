@@ -654,26 +654,80 @@ class OrderDetailFetcher:
 
         return result
 
+    def _get_status_priority(self, status: str) -> int:
+        priority_map = {
+            'unknown': 0,
+            'pending_payment': 10,
+            'pending_ship': 20,
+            'shipped': 30,
+            'completed': 40,
+            'refunding': 50,
+            'cancelled': 60,
+        }
+        return priority_map.get(status or 'unknown', 0)
+
     def _extract_status_from_text(self, text: str) -> str:
-        """从任意文本中提取订单状态"""
+        """从任意文本中提取订单状态，优先返回更可靠/更后置的状态。"""
         if not text:
             return 'unknown'
 
+        normalized_text = re.sub(r'\s+', ' ', str(text)).strip()
+        if not normalized_text:
+            return 'unknown'
+
         status_patterns = [
-            ('交易成功', 'success'),
-            ('交易关闭', 'closed'),
-            ('已关闭', 'closed'),
-            ('待付款', 'pending_payment'),
-            ('待发货', 'pending_ship'),
-            ('已发货', 'shipped'),
-            ('待收货', 'shipped'),
-            ('退款中', 'refunding'),
-            ('退款成功', 'refunded'),
+            ('cancelled', ['交易关闭', '已关闭', '钱款已原路退返', '订单关闭']),
+            ('refunding', ['退款中', '退货退款', '退款关闭']),
+            ('completed', ['买家确认收货', '已确认收货，交易成功', '交易成功', '已完成']),
+            ('shipped', ['等待买家收货', '待收货', '已发货', '查看物流', '确认收货']),
+            ('pending_ship', ['待发货', '等待你发货', '等待卖家发货', '去发货', '付款完成待发货', '记得及时发货']),
+            ('pending_payment', ['待付款', '等待买家付款']),
         ]
-        for pattern, status in status_patterns:
-            if pattern in text:
-                return status
-        return 'unknown'
+
+        matched_statuses = []
+        for status, patterns in status_patterns:
+            if any(pattern in normalized_text for pattern in patterns):
+                matched_statuses.append(status)
+
+        if not matched_statuses:
+            return 'unknown'
+
+        matched_statuses.sort(key=self._get_status_priority, reverse=True)
+        return matched_statuses[0]
+
+    async def _collect_texts_by_selectors(self, selectors, *, max_length: int = 40, max_items: int = 12) -> list:
+        """按选择器批量采集文本，自动去重。"""
+        collected = []
+        seen = set()
+
+        for selector in selectors:
+            try:
+                elements = await self.page.query_selector_all(selector)
+            except Exception as e:
+                logger.debug(f"批量采集选择器失败 {selector}: {e}")
+                continue
+
+            for element in elements:
+                try:
+                    text = await element.text_content()
+                except Exception as text_error:
+                    logger.debug(f"读取元素文本失败 {selector}: {text_error}")
+                    continue
+
+                normalized_text = re.sub(r'\s+', ' ', str(text or '')).strip()
+                if not normalized_text:
+                    continue
+                if max_length and len(normalized_text) > max_length:
+                    continue
+                if normalized_text in seen:
+                    continue
+
+                seen.add(normalized_text)
+                collected.append(normalized_text)
+                if len(collected) >= max_items:
+                    return collected
+
+        return collected
 
     async def _get_page_text(self) -> str:
         """获取页面可读文本，失败时返回空字符串"""
@@ -829,12 +883,12 @@ class OrderDetailFetcher:
 
         Returns:
             订单状态字符串，可能的值:
-            - 'success': 交易成功
-            - 'closed': 交易关闭
             - 'pending_payment': 待付款
             - 'pending_ship': 待发货
             - 'shipped': 已发货/待收货
+            - 'completed': 交易成功
             - 'refunding': 退款中
+            - 'cancelled': 交易关闭
             - 'unknown': 未知状态
         """
         try:
@@ -866,23 +920,48 @@ class OrderDetailFetcher:
                     logger.debug(f"选择器 {selector} 获取失败: {e}")
                     continue
 
+            button_selectors = [
+                'button',
+                '[role="button"]',
+                '[class*="button"]',
+                '[class*="Button"]',
+                '[class*="btn"]',
+            ]
+
             parsed_from_selector = 'unknown'
+            button_texts = await self._collect_texts_by_selectors(button_selectors, max_length=24, max_items=16)
+            button_status = 'unknown'
+            for button_text in button_texts:
+                candidate_status = self._extract_status_from_text(button_text)
+                if self._get_status_priority(candidate_status) > self._get_status_priority(button_status):
+                    button_status = candidate_status
 
             # 先解析选择器结果
             if status_text:
                 parsed_from_selector = self._extract_status_from_text(status_text)
-                if parsed_from_selector != 'unknown':
-                    logger.info(f"订单状态解析: {status_text} -> {parsed_from_selector}")
-                    return parsed_from_selector
-                logger.warning(f"未知的订单状态文本: {status_text}")
+                if parsed_from_selector == 'unknown':
+                    logger.warning(f"未知的订单状态文本: {status_text}")
 
-            # 如果选择器失败或未识别，尝试从页面文本中提取
-            if not status_text or parsed_from_selector == 'unknown':
-                body_text = await self._get_page_text()
-                parsed = self._extract_status_from_text(body_text)
-                if parsed != 'unknown':
-                    logger.info(f"从页面文本中检测到订单状态 -> {parsed}")
-                    return parsed
+            preferred_status = parsed_from_selector
+            if self._get_status_priority(button_status) > self._get_status_priority(preferred_status):
+                preferred_status = button_status
+
+            logger.info(
+                f"订单状态解析候选: selector={parsed_from_selector} ({status_text or 'empty'}), "
+                f"button={button_status} ({button_texts or []})"
+            )
+
+            if preferred_status != 'unknown':
+                logger.info(f"订单状态解析最终采用结构化结果: {preferred_status}")
+                return preferred_status
+
+            # 如果选择器/按钮都没有有效结果，尝试从页面文本中提取
+            body_text = await self._get_page_text()
+            body_status = self._extract_status_from_text(body_text)
+            logger.info(f"订单状态解析候选: body={body_status}")
+            if body_status != 'unknown':
+                logger.info(f"从页面文本中检测到订单状态 -> {body_status}")
+                return body_status
 
             logger.warning("无法获取订单状态")
             return 'unknown'
