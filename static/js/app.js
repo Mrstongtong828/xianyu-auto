@@ -14987,7 +14987,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v1.7.0';
+const DEFAULT_VERSION = 'v1.7.1';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -15101,9 +15101,20 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.7.0',
+    version: 'v1.7.1',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.7.1',
+            date: '2026-03-19',
+            updates: [
+                '【修复】订单规格识别改为优先读取结构化订单响应中的 skuInfo 和数量，减少页面元素缺失导致的漏识别',
+                '【修复】正文兜底不再把标题、描述等冒号文案误判为第二规格，避免单规格订单被错误识别为双规格',
+                '【优化】正文规格过滤只保留更像真实 SKU 字段的候选，进一步过滤时间、广告文案和无关文本',
+                '【修复】订单明确解析为单规格时自动清空历史残留的第二规格字段，避免旧脏数据继续影响发货匹配',
+                '【优化】多规格商品复用缓存时要求金额、状态和主规格同时有效，降低脏缓存复用风险'
+            ]
+        },
         {
             version: 'v1.7.0',
             date: '2026-03-19',
