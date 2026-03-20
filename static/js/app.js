@@ -15012,7 +15012,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v1.7.2';
+const DEFAULT_VERSION = 'v1.7.3';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -15126,9 +15126,17 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.7.2',
+    version: 'v1.7.3',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.7.3',
+            date: '2026-03-21',
+            updates: [
+                '【修复】热更新清单改为优先读取上一版 Release 资产中的 update_files.json，避免 deleted_files 丢失',
+                '【修复】修正同版本下热更新可能回滚清单生成脚本的问题，补齐删除清单并完善后续版本生成逻辑'
+            ]
+        },
         {
             version: 'v1.7.2',
             date: '2026-03-20',
