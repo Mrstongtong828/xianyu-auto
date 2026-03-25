@@ -2419,7 +2419,8 @@ def apply_patches():
     """
     logger.info("开始应用滑块验证模块补丁...")
     patch_check_date_validity()
-    patch_simulate_slide()  # 优化滑动模拟
+    # patch_simulate_slide() 已禁用：xianyu_slider_stealth.py 中的原版 simulate_slide 已优化
+    # 包含 Perlin 噪声轨迹、用户速度人格、服务端判定等待等改进，不再需要猴子补丁覆盖
     patch_login_with_password_headful()  # 重写密码登录方法
     logger.info("滑块验证模块补丁应用完成")
 

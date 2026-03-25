@@ -10740,7 +10740,7 @@ function showPasswordLoginQRCode(verificationUrl, screenshotPath) {
         
         // 更新状态文本
         if (statusText) {
-            statusText.textContent = '需要闲鱼验证，请点击下方按钮跳转到验证页面';
+            statusText.textContent = '服务端已保持原始会话；如二维码暂未显示，可使用下方兜底入口';
         }
     } else {
         // 都没有，显示等待
@@ -10784,7 +10784,7 @@ function createPasswordLoginQRModal() {
                             <a id="passwordLoginVerificationLink" href="#" target="_blank" 
                                class="btn btn-warning btn-lg" style="display: none;">
                                 <i class="bi bi-shield-check me-2"></i>
-                                跳转闲鱼人脸验证
+                                打开兜底验证页面
                             </a>
                         </div>
                         
@@ -11026,6 +11026,9 @@ async function checkQRCodeStatus() {
         case 'scanned':
             document.getElementById('statusText').textContent = '已扫码，请在手机上确认...';
             break;
+        case 'confirmed':
+            document.getElementById('statusText').textContent = '已确认，正在获取Cookie...';
+            break;
         case 'success':
             qrCodeVerificationState.completed = true;
             document.getElementById('statusText').textContent = '登录成功！';
@@ -11206,17 +11209,24 @@ function handleQRCodeSuccess(data) {
 
     // 添加真实cookie获取状态信息
     if (real_cookie_refreshed === true) {
-        if (token_prewarmed === false || task_restarted === false) {
-        successMessage += '\n✅ 真实Cookie已获取';
-        if (warning_message) {
-            successMessage += `\n⚠️ ${warning_message}`;
-        }
-        document.getElementById('statusText').textContent = '登录完成，但账号任务尚未切换';
-        showToast(successMessage, 'warning');
+        if (task_restarted === false) {
+            successMessage += '\n✅ 真实Cookie已获取';
+            if (warning_message) {
+                successMessage += `\n⚠️ ${warning_message}`;
+            }
+            document.getElementById('statusText').textContent = '登录完成，但账号任务尚未切换';
+            showToast(successMessage, 'warning');
+        } else if (token_prewarmed === false) {
+            successMessage += '\n✅ 真实Cookie获取并保存成功';
+            if (warning_message) {
+                successMessage += `\n⚠️ ${warning_message}`;
+            }
+            document.getElementById('statusText').textContent = '登录完成，账号任务已切换，Token将在后台继续初始化';
+            showToast(successMessage, 'warning');
         } else {
-        successMessage += '\n✅ 真实Cookie获取并保存成功';
-        document.getElementById('statusText').textContent = '登录成功！真实Cookie已获取并保存';
-        showToast(successMessage, 'success');
+            successMessage += '\n✅ 真实Cookie获取并保存成功';
+            document.getElementById('statusText').textContent = '登录成功！真实Cookie已获取并保存';
+            showToast(successMessage, 'success');
         }
     } else if (real_cookie_refreshed === false) {
         successMessage += '\n⚠️ 真实Cookie获取失败，已保存原始扫码Cookie';
