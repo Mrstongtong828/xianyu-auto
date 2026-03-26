@@ -7881,6 +7881,65 @@ Cookie数量: {cookie_count}
         except Exception as e:
             logger.error(f"删除风控日志失败: {e}")
             return False
+
+    def mark_stale_risk_control_logs_failed(self, timeout_minutes: int = 15, cookie_id: str = None) -> int:
+        """将超时仍为processing的风控日志标记为failed
+
+        Args:
+            timeout_minutes: 超时分钟数
+            cookie_id: 可选，指定cookie_id范围
+
+        Returns:
+            int: 更新的记录数
+        """
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+
+                if cookie_id:
+                    cursor.execute(
+                        '''
+                        UPDATE risk_control_logs
+                        SET
+                            processing_status = 'failed',
+                            error_message = COALESCE(error_message, ?),
+                            processing_result = COALESCE(processing_result, ?),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE processing_status = 'processing'
+                          AND cookie_id = ?
+                          AND datetime(created_at) <= datetime('now', '-' || ? || ' minutes')
+                        ''',
+                        (
+                            f'处理超时（>{timeout_minutes}分钟），系统自动关闭',
+                            '处理超时，自动标记失败',
+                            cookie_id,
+                            timeout_minutes
+                        )
+                    )
+                else:
+                    cursor.execute(
+                        '''
+                        UPDATE risk_control_logs
+                        SET
+                            processing_status = 'failed',
+                            error_message = COALESCE(error_message, ?),
+                            processing_result = COALESCE(processing_result, ?),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE processing_status = 'processing'
+                          AND datetime(created_at) <= datetime('now', '-' || ? || ' minutes')
+                        ''',
+                        (
+                            f'处理超时（>{timeout_minutes}分钟），系统自动关闭',
+                            '处理超时，自动标记失败',
+                            timeout_minutes
+                        )
+                    )
+
+                self.conn.commit()
+                return cursor.rowcount
+        except Exception as e:
+            logger.error(f"标记超时风控日志失败: {e}")
+            return 0
     
     def cleanup_old_data(self, days: int = 90) -> dict:
         """清理过期的历史数据，防止数据库无限增长

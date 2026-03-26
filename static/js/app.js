@@ -10477,24 +10477,53 @@ function updateRefreshCookieStatus(message) {
 
 // 轮询检查刷新Cookie状态
 let refreshCookieCheckInterval = null;
+let refreshCookiePollingState = {
+    sessionId: null,
+    cookieId: null,
+    inFlight: false,
+    completed: false
+};
+
+function stopRefreshCookiePolling(sessionId = refreshCookiePollingState.sessionId) {
+    if (sessionId && refreshCookiePollingState.sessionId && refreshCookiePollingState.sessionId !== sessionId) {
+        return;
+    }
+
+    if (refreshCookieCheckInterval) {
+        clearInterval(refreshCookieCheckInterval);
+        refreshCookieCheckInterval = null;
+    }
+
+    refreshCookiePollingState.completed = true;
+}
 
 function startRefreshCookiePolling(sessionId, cookieId) {
     // 清除之前的轮询
-    if (refreshCookieCheckInterval) {
-        clearInterval(refreshCookieCheckInterval);
-    }
+    stopRefreshCookiePolling();
+
+    refreshCookiePollingState = {
+        sessionId,
+        cookieId,
+        inFlight: false,
+        completed: false
+    };
 
     let checkCount = 0;
     const maxChecks = 120; // 最多检查120次，每次2秒，共4分钟
 
-    refreshCookieCheckInterval = setInterval(async () => {
+    const pollRefreshCookieStatus = async () => {
+        if (refreshCookiePollingState.completed || refreshCookiePollingState.inFlight || refreshCookiePollingState.sessionId !== sessionId) {
+            return;
+        }
+
+        refreshCookiePollingState.inFlight = true;
         checkCount++;
 
         if (checkCount > maxChecks) {
-            clearInterval(refreshCookieCheckInterval);
-            refreshCookieCheckInterval = null;
+            stopRefreshCookiePolling(sessionId);
             toggleLoading(false);
             showToast('刷新Cookie超时，请重试', 'warning');
+            refreshCookiePollingState.inFlight = false;
             return;
         }
 
@@ -10505,6 +10534,11 @@ function startRefreshCookiePolling(sessionId, cookieId) {
                 }
             });
             const data = await response.json();
+
+            if (refreshCookiePollingState.sessionId !== sessionId || refreshCookiePollingState.completed) {
+                return;
+            }
+
             console.log('刷新Cookie状态检查:', data); // 调试日志
 
             switch (data.status) {
@@ -10519,8 +10553,7 @@ function startRefreshCookiePolling(sessionId, cookieId) {
                     showPasswordLoginQRCode(data.screenshot_path || data.verification_url || data.qr_code_url, data.screenshot_path);
                     break;
                 case 'success':
-                    clearInterval(refreshCookieCheckInterval);
-                    refreshCookieCheckInterval = null;
+                    stopRefreshCookiePolling(sessionId);
                     toggleLoading(false);
                     showToast(`账号 ${cookieId} Cookie刷新成功！`, 'success');
                     // 隐藏表单
@@ -10532,22 +10565,33 @@ function startRefreshCookiePolling(sessionId, cookieId) {
                 case 'error':
                 case 'not_found':
                 case 'forbidden':
-                    clearInterval(refreshCookieCheckInterval);
-                    refreshCookieCheckInterval = null;
+                    stopRefreshCookiePolling(sessionId);
                     toggleLoading(false);
                     showToast(`刷新失败: ${data.message || data.error || '未知错误'}`, 'danger');
                     break;
             }
         } catch (error) {
             console.error('检查刷新状态失败:', error);
+        } finally {
+            if (refreshCookiePollingState.sessionId === sessionId) {
+                refreshCookiePollingState.inFlight = false;
+            }
         }
-    }, 2000);
+    };
+
+    refreshCookieCheckInterval = setInterval(pollRefreshCookieStatus, 2000);
+    pollRefreshCookieStatus();
 }
 
 // ========================= 账号密码登录相关函数 =========================
 
 let passwordLoginCheckInterval = null;
 let passwordLoginSessionId = null;
+let passwordLoginPollingState = {
+    sessionId: null,
+    inFlight: false,
+    completed: false
+};
 
 // 处理账号密码登录表单提交
 async function handlePasswordLogin(event) {
@@ -10605,19 +10649,27 @@ async function handlePasswordLogin(event) {
 
 // 开始检查账号密码登录状态
 function startPasswordLoginCheck() {
-    if (passwordLoginCheckInterval) {
-        clearInterval(passwordLoginCheckInterval);
-    }
-    
+    clearPasswordLoginCheck();
+
+    passwordLoginPollingState = {
+        sessionId: passwordLoginSessionId,
+        inFlight: false,
+        completed: false
+    };
+
     passwordLoginCheckInterval = setInterval(checkPasswordLoginStatus, 2000); // 每2秒检查一次
+    checkPasswordLoginStatus();
 }
 
 // 检查账号密码登录状态
 async function checkPasswordLoginStatus() {
-    if (!passwordLoginSessionId) return;
+    if (!passwordLoginSessionId || passwordLoginPollingState.completed || passwordLoginPollingState.inFlight) return;
+
+    const sessionId = passwordLoginSessionId;
+    passwordLoginPollingState.inFlight = true;
     
     try {
-        const response = await fetch(`${apiBase}/password-login/check/${passwordLoginSessionId}`, {
+        const response = await fetch(`${apiBase}/password-login/check/${sessionId}`, {
             headers: {
                 'Authorization': `Bearer ${authToken}`
             }
@@ -10625,6 +10677,11 @@ async function checkPasswordLoginStatus() {
         
         if (response.ok) {
             const data = await response.json();
+
+            if (passwordLoginPollingState.sessionId !== sessionId || passwordLoginPollingState.completed) {
+                return;
+            }
+
             console.log('账号密码登录状态检查:', data); // 调试日志
             
             switch (data.status) {
@@ -10638,11 +10695,13 @@ async function checkPasswordLoginStatus() {
                     break;
                 case 'success':
                     // 登录成功
+                    passwordLoginPollingState.completed = true;
                     clearPasswordLoginCheck();
                     handlePasswordLoginSuccess(data);
                     break;
                 case 'failed':
                     // 登录失败
+                    passwordLoginPollingState.completed = true;
                     clearPasswordLoginCheck();
                     handlePasswordLoginFailure(data);
                     break;
@@ -10650,6 +10709,7 @@ async function checkPasswordLoginStatus() {
                 case 'forbidden':
                 case 'error':
                     // 错误情况
+                    passwordLoginPollingState.completed = true;
                     clearPasswordLoginCheck();
                     showToast(data.message || '登录检查失败', 'danger');
                     resetPasswordLoginForm();
@@ -10659,10 +10719,12 @@ async function checkPasswordLoginStatus() {
             // 响应不OK时也尝试解析错误消息
             try {
                 const errorData = await response.json();
+                passwordLoginPollingState.completed = true;
                 clearPasswordLoginCheck();
                 showToast(errorData.message || '登录检查失败', 'danger');
                 resetPasswordLoginForm();
             } catch (e) {
+                passwordLoginPollingState.completed = true;
                 clearPasswordLoginCheck();
                 showToast('登录检查失败，请重试', 'danger');
                 resetPasswordLoginForm();
@@ -10670,9 +10732,14 @@ async function checkPasswordLoginStatus() {
         }
     } catch (error) {
         console.error('检查账号密码登录状态失败:', error);
+        passwordLoginPollingState.completed = true;
         clearPasswordLoginCheck();
         showToast('网络错误，请重试', 'danger');
         resetPasswordLoginForm();
+    } finally {
+        if (passwordLoginPollingState.sessionId === sessionId) {
+            passwordLoginPollingState.inFlight = false;
+        }
     }
 }
 
@@ -10853,6 +10920,11 @@ function clearPasswordLoginCheck() {
 function resetPasswordLoginForm() {
     passwordLoginSessionId = null;
     clearPasswordLoginCheck();
+    passwordLoginPollingState = {
+        sessionId: null,
+        inFlight: false,
+        completed: false
+    };
     
     const submitBtn = document.querySelector('#passwordLoginFormElement button[type="submit"]');
     if (submitBtn) {
@@ -10865,6 +10937,7 @@ function resetPasswordLoginForm() {
 
 let qrCodeCheckInterval = null;
 let qrCodeSessionId = null;
+let qrCodeModalEventsBound = false;
 let qrCodeVerificationState = {
     renderKey: '',
     toastShown: false,
@@ -10891,20 +10964,48 @@ function resetQRCodeVerificationState() {
     qrCodeVerificationState.activeSessionId = null;
 }
 
+function closeQRCodeLoginModal(delay = 3000) {
+    setTimeout(() => {
+        const modalElement = document.getElementById('qrCodeLoginModal');
+        if (!modalElement) {
+            loadCookies();
+            return;
+        }
+
+        const modal = bootstrap.Modal.getInstance(modalElement) || new bootstrap.Modal(modalElement);
+        modal.hide();
+        loadCookies();
+    }, delay);
+}
+
+function initializeQRCodeLoginModal() {
+    const modalElement = document.getElementById('qrCodeLoginModal');
+    if (!modalElement || qrCodeModalEventsBound) {
+        return modalElement;
+    }
+
+    modalElement.addEventListener('shown.bs.modal', function () {
+        generateQRCode();
+    });
+
+    modalElement.addEventListener('hidden.bs.modal', function () {
+        clearQRCodeCheck();
+    });
+
+    qrCodeModalEventsBound = true;
+    return modalElement;
+}
+
 // 显示扫码登录模态框
 function showQRCodeLogin() {
-    const modal = new bootstrap.Modal(document.getElementById('qrCodeLoginModal'));
+    const modalElement = initializeQRCodeLoginModal();
+    if (!modalElement) {
+        showToast('扫码登录弹窗未找到，请刷新页面重试', 'danger');
+        return;
+    }
+
+    const modal = bootstrap.Modal.getInstance(modalElement) || new bootstrap.Modal(modalElement);
     modal.show();
-
-    // 模态框显示后生成二维码
-    modal._element.addEventListener('shown.bs.modal', function () {
-    generateQRCode();
-    });
-
-    // 模态框关闭时清理定时器
-    modal._element.addEventListener('hidden.bs.modal', function () {
-    clearQRCodeCheck();
-    });
 }
 
 // 刷新二维码（兼容旧函数名）
@@ -11036,6 +11137,13 @@ async function checkQRCodeStatus() {
             clearQRCodeCheck();
             handleQRCodeSuccess(data);
             break;
+        case 'error':
+            qrCodeVerificationState.completed = true;
+            document.getElementById('statusText').textContent = '登录失败';
+            document.getElementById('statusSpinner').style.display = 'none';
+            clearQRCodeCheck();
+            showToast(data.message || '扫码登录失败', 'danger');
+            break;
         case 'expired':
             document.getElementById('statusText').textContent = '二维码已过期';
             document.getElementById('statusSpinner').style.display = 'none';
@@ -11061,7 +11169,7 @@ async function checkQRCodeStatus() {
             document.getElementById('statusText').textContent = '登录已完成';
             document.getElementById('statusSpinner').style.display = 'none';
             clearQRCodeCheck();
-            showToast('该扫码会话已处理完成', 'info');
+            handleQRCodeSuccess(data);
             break;
         }
     }
@@ -11241,15 +11349,13 @@ function handleQRCodeSuccess(data) {
         showToast(successMessage, 'success');
     }
 
-    // 关闭模态框
-    setTimeout(() => {
-        const modal = bootstrap.Modal.getInstance(document.getElementById('qrCodeLoginModal'));
-        modal.hide();
-
-        // 刷新账号列表
-        loadCookies();
-    }, 3000); // 延长显示时间以便用户看到详细信息
+    closeQRCodeLoginModal(3000);
+    return;
     }
+
+    document.getElementById('statusText').textContent = '登录成功！';
+    showToast(data.message || '扫码登录已完成，账号信息已同步', 'success');
+    closeQRCodeLoginModal(1500);
 }
 
 // 清理二维码检查

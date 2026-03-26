@@ -2471,6 +2471,20 @@ def _update_session_risk_log(session_id: str, status: str, processing_result: st
     except Exception as e:
         logger.error(f"更新风控日志状态失败: {e}")
 
+
+def _set_password_login_session_status(session_id: str, status: str, **fields):
+    session = password_login_sessions.get(session_id)
+    if not session:
+        return
+
+    session['status'] = status
+    session.update(fields)
+
+    if status in {'success', 'failed'}:
+        session['completed_at'] = time.time()
+    else:
+        session['completed_at'] = None
+
 async def _execute_password_login(session_id: str, account_id: str, account: str, password: str, show_browser: bool, user_id: int, current_user: Dict[str, Any]):
     """后台执行账号密码登录任务"""
     manual_refresh_acquired = False
@@ -2485,8 +2499,11 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
             manual_refresh_state = XianyuLive.begin_manual_refresh(account_id, source=manual_refresh_owner)
             manual_refresh_acquired = manual_refresh_state.get('started', False)
             if manual_refresh_state.get('already_active'):
-                password_login_sessions[session_id]['status'] = 'failed'
-                password_login_sessions[session_id]['error'] = '该账号正在执行手动刷新，请稍候再试'
+                _set_password_login_session_status(
+                    session_id,
+                    'failed',
+                    error='该账号正在执行手动刷新，请稍候再试'
+                )
                 _update_session_risk_log(session_id, 'failed', error_message='账号正在执行手动刷新')
                 log_with_user('warning', f"账号已存在手动刷新任务，拒绝重复触发: {account_id}", current_user)
                 return
@@ -2523,10 +2540,13 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                 # 优先使用截图路径，如果没有截图则使用验证链接
                 if actual_screenshot_path and os.path.exists(actual_screenshot_path):
                     # 更新会话状态，保存截图路径
-                    password_login_sessions[session_id]['status'] = 'verification_required'
-                    password_login_sessions[session_id]['screenshot_path'] = actual_screenshot_path
-                    password_login_sessions[session_id]['verification_url'] = None
-                    password_login_sessions[session_id]['qr_code_url'] = None
+                    _set_password_login_session_status(
+                        session_id,
+                        'verification_required',
+                        screenshot_path=actual_screenshot_path,
+                        verification_url=None,
+                        qr_code_url=None
+                    )
                     log_with_user('info', f"人脸认证截图已保存: {session_id}, 路径: {actual_screenshot_path}", current_user)
                     
                     # 发送通知到用户配置的渠道
@@ -2586,10 +2606,13 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                     log_with_user('info', f"已启动人脸验证通知发送线程: {account_id}", current_user)
                 elif verification_url:
                     # 如果没有截图，使用验证链接（兼容旧版本）
-                    password_login_sessions[session_id]['status'] = 'verification_required'
-                    password_login_sessions[session_id]['verification_url'] = verification_url
-                    password_login_sessions[session_id]['screenshot_path'] = None
-                    password_login_sessions[session_id]['qr_code_url'] = None
+                    _set_password_login_session_status(
+                        session_id,
+                        'verification_required',
+                        verification_url=verification_url,
+                        screenshot_path=None,
+                        qr_code_url=None
+                    )
                     log_with_user('info', f"人脸认证验证链接已保存: {session_id}, URL: {verification_url}", current_user)
                     
                     # 发送通知到用户配置的渠道
@@ -2665,8 +2688,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                 
                 if cookies_dict is None:
                     failure_message = slider_instance.last_login_error or '登录失败，请检查账号密码是否正确'
-                    password_login_sessions[session_id]['status'] = 'failed'
-                    password_login_sessions[session_id]['error'] = failure_message
+                    _set_password_login_session_status(session_id, 'failed', error=failure_message)
                     log_with_user('error', f"账号密码登录失败: {account_id}, 错误: {failure_message}", current_user)
                     # 更新风控日志状态
                     _update_session_risk_log(session_id, 'failed', error_message=failure_message[:200])
@@ -2813,10 +2835,13 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         # 刷新失败不影响登录成功
                 
                 # 更新会话状态
-                password_login_sessions[session_id]['status'] = 'success'
-                password_login_sessions[session_id]['account_id'] = account_id
-                password_login_sessions[session_id]['is_new_account'] = is_new_account
-                password_login_sessions[session_id]['cookie_count'] = len(cookies_dict)
+                _set_password_login_session_status(
+                    session_id,
+                    'success',
+                    account_id=account_id,
+                    is_new_account=is_new_account,
+                    cookie_count=len(cookies_dict)
+                )
                 # 更新风控日志状态
                 _update_session_risk_log(session_id, 'success', processing_result='Cookie刷新成功')
 
@@ -2866,8 +2891,7 @@ Cookie数量: {cookie_count}
                 
             except Exception as e:
                 error_msg = str(e)
-                password_login_sessions[session_id]['status'] = 'failed'
-                password_login_sessions[session_id]['error'] = error_msg
+                _set_password_login_session_status(session_id, 'failed', error=error_msg)
                 log_with_user('error', f"账号密码登录失败: {account_id}, 错误: {error_msg}", current_user)
                 logger.info(f"会话 {session_id} 状态已更新为 failed，错误消息: {error_msg}")  # 添加日志确认状态更新
                 # 更新风控日志状态
@@ -2897,8 +2921,7 @@ Cookie数量: {cookie_count}
         login_thread_started = True
         
     except Exception as e:
-        password_login_sessions[session_id]['status'] = 'failed'
-        password_login_sessions[session_id]['error'] = str(e)
+        _set_password_login_session_status(session_id, 'failed', error=str(e))
         log_with_user('error', f"执行账号密码登录任务异常: {str(e)}", current_user)
         _update_session_risk_log(session_id, 'failed', error_message=str(e)[:200])
         if manual_refresh_acquired and not login_thread_started:
@@ -2992,6 +3015,7 @@ async def password_login(
             'slider_instance': None,
             'task': None,
             'timestamp': time.time(),
+            'completed_at': None,
             'user_id': user_id
         }
         
@@ -3026,7 +3050,9 @@ async def check_password_login_status(
         current_time = time.time()
         expired_sessions = [
             sid for sid, session in password_login_sessions.items()
-            if current_time - session['timestamp'] > 3600
+            if (
+                session.get('completed_at') and current_time - session['completed_at'] > 300
+            ) or current_time - session['timestamp'] > 3600
         ]
         for sid in expired_sessions:
             if sid in password_login_sessions:
@@ -3067,17 +3093,16 @@ async def check_password_login_status(
                         log_with_user('warning', f"删除截图失败: {screenshot_path}", current_user)
                 except Exception as e:
                     log_with_user('error', f"删除截图时出错: {str(e)}", current_user)
+                finally:
+                    session['screenshot_path'] = None
             
-            result = {
+            return {
                 'status': 'success',
                 'message': f'账号 {session["account_id"]} 登录成功',
                 'account_id': session['account_id'],
                 'is_new_account': session.get('is_new_account', False),
                 'cookie_count': session.get('cookie_count', 0)
             }
-            # 清理会话
-            del password_login_sessions[session_id]
-            return result
         elif status == 'failed':
             # 登录失败
             # 删除截图（如果存在）
@@ -3091,17 +3116,16 @@ async def check_password_login_status(
                         log_with_user('warning', f"删除截图失败: {screenshot_path}", current_user)
                 except Exception as e:
                     log_with_user('error', f"删除截图时出错: {str(e)}", current_user)
+                finally:
+                    session['screenshot_path'] = None
             
             error_msg = session.get('error', '登录失败')
             log_with_user('info', f"返回登录失败状态: {session_id}, 错误消息: {error_msg}", current_user)  # 添加日志
-            result = {
+            return {
                 'status': 'failed',
                 'message': error_msg,
                 'error': error_msg  # 也包含error字段，确保前端能获取到
             }
-            # 清理会话
-            del password_login_sessions[session_id]
-            return result
         else:
             # 处理中
             return {
@@ -3274,7 +3298,18 @@ async def check_qr_code_status(session_id: str, current_user: Dict[str, Any] = D
             record = qr_check_processed[session_id]
             if record['processed']:
                 log_with_user('debug', f"扫码登录session {session_id} 已处理过，直接返回", current_user)
-                # 返回简单的成功状态，避免重复处理
+                if record.get('error'):
+                    return {'status': 'error', 'message': record['error']}
+
+                account_info = record.get('account_info')
+                if account_info:
+                    return {
+                        'status': 'success',
+                        'message': '扫码登录已完成',
+                        'account_info': account_info,
+                        'already_processed': True,
+                    }
+
                 return {'status': 'already_processed', 'message': '该会话已处理完成'}
 
         # 获取该session的锁
@@ -3289,6 +3324,19 @@ async def check_qr_code_status(session_id: str, current_user: Dict[str, Any] = D
             # 再次检查是否已处理（双重检查）
             if session_id in qr_check_processed and qr_check_processed[session_id]['processed']:
                 log_with_user('debug', f"扫码登录session {session_id} 在获取锁后发现已处理，直接返回", current_user)
+                record = qr_check_processed[session_id]
+                if record.get('error'):
+                    return {'status': 'error', 'message': record['error']}
+
+                account_info = record.get('account_info')
+                if account_info:
+                    return {
+                        'status': 'success',
+                        'message': '扫码登录已完成',
+                        'account_info': account_info,
+                        'already_processed': True,
+                    }
+
                 return {'status': 'already_processed', 'message': '该会话已处理完成'}
 
             # 清理过期会话

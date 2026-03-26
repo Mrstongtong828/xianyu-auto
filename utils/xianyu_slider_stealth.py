@@ -805,6 +805,7 @@ class XianyuSliderStealth:
         self.failure_history_file = f"trajectory_history/{self.pure_user_id}_failure.json"
         self.last_verification_feedback = {}
         self.last_login_error = ""
+        self._slider_refresh_mode = False
         self.trajectory_params = {
             "total_steps_range": [5, 8],  # 极速：5-8步（超快滑动）
             "base_delay_range": [0.0002, 0.0005],  # 极速：0.2-0.5ms延迟
@@ -1730,16 +1731,503 @@ class XianyuSliderStealth:
     }
     _X5_COOKIE_PREFIX = 'x5'
 
-    def _snapshot_context_cookies(self) -> Dict[str, str]:
-        """快照当前浏览器上下文中的所有 Cookie，返回 {name: value} 字典"""
+    def _snapshot_context_cookies(self, context=None) -> Dict[str, str]:
+        """快照浏览器上下文中的所有 Cookie，返回 {name: value} 字典"""
         try:
-            if not self.context:
+            current_context = context or self.context
+            if not current_context:
                 return {}
-            raw = self.context.cookies()
+            raw = current_context.cookies()
             return {c['name']: c['value'] for c in raw} if raw else {}
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】快照 Cookie 失败: {e}")
             return {}
+
+    def _safe_page_url(self, page) -> str:
+        try:
+            return str(page.url or '')
+        except Exception:
+            return ''
+
+    def _safe_page_title(self, page) -> str:
+        try:
+            return str(page.title() or '')
+        except Exception:
+            return ''
+
+    def _get_context_pages(self, context=None, fallback_page=None) -> List[Any]:
+        pages = []
+        seen = set()
+        candidates = []
+
+        current_context = context or self.context
+        if current_context:
+            try:
+                candidates.extend(list(current_context.pages))
+            except Exception:
+                pass
+
+        if fallback_page:
+            candidates.append(fallback_page)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            candidate_id = id(candidate)
+            if candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            try:
+                if candidate.is_closed():
+                    continue
+            except Exception:
+                pass
+            pages.append(candidate)
+
+        return pages
+
+    def _has_completed_login_cookies(self, cookie_dict: Dict[str, str]) -> bool:
+        if not cookie_dict.get('unb'):
+            return False
+
+        companion_keys = (
+            'cookie2', 'havana_lgc2_77', '_tb_token_', 'sgcookie',
+            '_m_h5_tk', '_m_h5_tk_enc', 't'
+        )
+        return any(cookie_dict.get(key) for key in companion_keys)
+
+    def _is_logged_in_url(self, url: str) -> bool:
+        current_url = str(url or '')
+        if not current_url:
+            return False
+
+        if 'www.goofish.com/im' in current_url:
+            return True
+
+        return (
+            'goofish.com' in current_url and
+            'passport.goofish.com' not in current_url and
+            'mini_login' not in current_url and
+            '/iv/' not in current_url
+        )
+
+    def _looks_like_verification_url(self, url: str) -> bool:
+        current_url = str(url or '').lower()
+        if not current_url:
+            return False
+
+        verification_tokens = (
+            'passport.goofish.com',
+            'mini_login',
+            'identity_verify',
+            '/iv/',
+            'qrcode',
+            'scan',
+            'verify',
+        )
+        return any(token in current_url for token in verification_tokens)
+
+    def _page_has_keep_login_prompt(self, page) -> bool:
+        try:
+            prompt_selectors = [
+                'text=保持登录',
+                'text=不保持',
+            ]
+            for selector in prompt_selectors:
+                try:
+                    element = page.query_selector(selector)
+                    if element and element.is_visible():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    def _page_has_login_form(self, page) -> bool:
+        if not page:
+            return False
+
+        login_selectors = [
+            '#fm-login-id',
+            'input[name="fm-login-id"]',
+            '#fm-login-password',
+            'button.password-login',
+        ]
+
+        frames_to_check = [page]
+        try:
+            frames_to_check.extend(list(page.frames))
+        except Exception:
+            pass
+
+        for frame in frames_to_check:
+            for selector in login_selectors:
+                try:
+                    element = frame.query_selector(selector)
+                    if element and element.is_visible():
+                        return True
+                except Exception:
+                    continue
+
+        return False
+
+    def _read_frame_text_for_detection(self, frame) -> str:
+        """优先读取可见文本，避免把 HTML/CSS/JS 误判成验证文案。"""
+        if not frame:
+            return ''
+
+        text_candidates = []
+
+        try:
+            visible_text = frame.inner_text('body', timeout=1500)
+            if visible_text:
+                text_candidates.append(str(visible_text))
+        except Exception:
+            pass
+
+        try:
+            content_text = frame.content()
+            if content_text:
+                text_candidates.append(str(content_text))
+        except Exception:
+            pass
+
+        merged = '\n'.join(text_candidates)
+        return merged[:20000] if merged else ''
+
+    def _page_looks_like_verification(self, page) -> bool:
+        try:
+            if self._page_has_login_form(page):
+                return False
+
+            page_url = self._safe_page_url(page)
+            if self._looks_like_verification_url(page_url):
+                return True
+
+            try:
+                iframe = page.query_selector('iframe#alibaba-login-box')
+                if iframe:
+                    return True
+            except Exception:
+                pass
+
+            try:
+                for frame in page.frames:
+                    if self._looks_like_verification_url(getattr(frame, 'url', '')):
+                        return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        return False
+
+    def _select_monitor_page(self, context=None, fallback_page=None):
+        pages = self._get_context_pages(context, fallback_page)
+        if not pages:
+            return fallback_page
+
+        reversed_pages = list(reversed(pages))
+
+        for candidate in reversed_pages:
+            if self._page_looks_like_verification(candidate):
+                return candidate
+
+        for candidate in reversed_pages:
+            if self._page_has_keep_login_prompt(candidate):
+                return candidate
+
+        for candidate in reversed_pages:
+            page_url = self._safe_page_url(candidate)
+            if page_url and page_url != 'about:blank':
+                return candidate
+
+        return reversed_pages[0]
+
+    def _probe_context_login_success(self, context, fallback_page=None) -> Tuple[bool, Any, Dict[str, str]]:
+        monitor_page = self._select_monitor_page(context, fallback_page)
+        cookie_dict = self._snapshot_context_cookies(context)
+
+        if monitor_page:
+            try:
+                if self._check_login_success_by_element(monitor_page):
+                    logger.success(f"【{self.pure_user_id}】✅ 当前监控页面已确认登录成功")
+                    return True, monitor_page, cookie_dict
+            except Exception as e:
+                logger.debug(f"【{self.pure_user_id}】检查监控页面登录状态失败: {e}")
+
+        if not self._has_completed_login_cookies(cookie_dict):
+            return False, monitor_page, cookie_dict
+
+        if monitor_page:
+            current_url = self._safe_page_url(monitor_page)
+            if self._is_logged_in_url(current_url) and not self._page_looks_like_verification(monitor_page):
+                logger.success(
+                    f"【{self.pure_user_id}】✅ 检测到上下文已登录，当前URL: {current_url}"
+                )
+                return True, monitor_page, cookie_dict
+
+        probe_page = None
+        try:
+            probe_page = context.new_page()
+            probe_page.goto('https://www.goofish.com/im', wait_until='domcontentloaded', timeout=30000)
+            time.sleep(1.5)
+
+            probe_cookies = self._snapshot_context_cookies(context)
+            probe_url = self._safe_page_url(probe_page)
+            if self._check_login_success_by_element(probe_page):
+                logger.success(f"【{self.pure_user_id}】✅ 通过探测页面确认登录成功")
+                return True, monitor_page or fallback_page, probe_cookies
+
+            if self._has_completed_login_cookies(probe_cookies) and self._is_logged_in_url(probe_url):
+                logger.success(f"【{self.pure_user_id}】✅ 通过探测页面URL和Cookie确认登录成功")
+                return True, monitor_page or fallback_page, probe_cookies
+        except Exception as e:
+            logger.debug(f"【{self.pure_user_id}】探测上下文登录状态失败: {e}")
+        finally:
+            if probe_page:
+                try:
+                    probe_page.close()
+                except Exception:
+                    pass
+
+        return False, monitor_page, cookie_dict
+
+    def _page_has_slider(self, page) -> bool:
+        if not page:
+            return False
+
+        slider_selectors = [
+            '#nc_1_n1z',
+            '.nc-container',
+            '.nc_scale',
+            '.nc-wrapper',
+            '#baxia-dialog-content',
+            '.nc_wrapper',
+            '#nocaptcha',
+        ]
+
+        frames_to_check = [page]
+        try:
+            frames_to_check.extend(list(page.frames))
+        except Exception:
+            pass
+
+        for frame in frames_to_check:
+            for selector in slider_selectors:
+                try:
+                    element = frame.query_selector(selector)
+                    if element and element.is_visible():
+                        logger.info(f"【{self.pure_user_id}】检测到滑块元素: {selector}")
+                        return True
+                except Exception:
+                    continue
+
+        return False
+
+    def _attempt_solve_slider_on_page(self, page) -> bool:
+        if not page or not self._page_has_slider(page):
+            return False
+
+        logger.info(f"【{self.pure_user_id}】在当前活动页面检测到滑块，尝试自动处理...")
+        original_page = self.page
+        try:
+            self.page = page
+            solved = self.solve_slider(max_retries=3, fast_mode=True)
+            if solved:
+                logger.success(f"【{self.pure_user_id}】✅ 当前活动页面滑块处理成功")
+                time.sleep(2)
+            else:
+                logger.warning(f"【{self.pure_user_id}】⚠️ 当前活动页面滑块处理未成功")
+            return solved
+        finally:
+            self.page = original_page
+
+    def _cleanup_verification_screenshots(self):
+        try:
+            import glob
+
+            screenshots_dir = 'static/uploads/images'
+            all_screenshots = glob.glob(os.path.join(screenshots_dir, f'face_verify_{self.pure_user_id}_*.jpg'))
+            all_screenshots += glob.glob(os.path.join(screenshots_dir, f'face_verify_{self.pure_user_id}_*.png'))
+            for screenshot_file in all_screenshots:
+                try:
+                    if os.path.exists(screenshot_file):
+                        os.remove(screenshot_file)
+                        logger.info(f"【{self.pure_user_id}】✅ 已删除验证截图: {screenshot_file}")
+                except Exception as e:
+                    logger.warning(f"【{self.pure_user_id}】⚠️ 删除截图失败: {e}")
+        except Exception as e:
+            logger.error(f"【{self.pure_user_id}】删除截图时出错: {e}")
+
+    def _wait_for_context_login(self, context, fallback_page, max_wait_time: int = 450, check_interval: int = 10) -> Tuple[bool, Any]:
+        waited_time = 0
+        monitor_page = fallback_page
+
+        while waited_time < max_wait_time:
+            monitor_page = self._select_monitor_page(context, monitor_page)
+            self._attempt_solve_slider_on_page(monitor_page)
+
+            login_success, success_page, _ = self._probe_context_login_success(context, monitor_page)
+            if login_success:
+                return True, success_page or monitor_page
+
+            time.sleep(check_interval)
+            waited_time += check_interval
+            logger.info(f"【{self.pure_user_id}】等待验证中... (已等待{waited_time}秒/{max_wait_time}秒)")
+
+        return False, self._select_monitor_page(context, monitor_page)
+
+    def _notify_verification_required(
+        self,
+        verification_type: str,
+        frame_url: Optional[str],
+        screenshot_path: Optional[str],
+        notification_callback: Optional[Callable],
+        notification_scene: str,
+    ):
+        if not notification_callback or not (screenshot_path or frame_url):
+            if not notification_callback:
+                logger.warning(f"【{self.pure_user_id}】⚠️ notification_callback 未提供，无法发送通知")
+            else:
+                logger.warning(f"【{self.pure_user_id}】无法获取验证信息，跳过通知发送")
+            return
+
+        verification_type_titles = {
+            'face_verify': f'⚠️ {notification_scene}需要人脸验证',
+            'sms_verify': f'⚠️ {notification_scene}需要短信验证',
+            'qr_verify': f'⚠️ {notification_scene}需要二维码验证',
+            'unknown': f'⚠️ {notification_scene}需要身份验证',
+        }
+        title = verification_type_titles.get(verification_type, f'⚠️ {notification_scene}需要身份验证')
+
+        if screenshot_path:
+            notification_msg = (
+                f"{title}\n\n"
+                f"账号: {self.pure_user_id}\n"
+                f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"请登录自动化网站，访问账号管理模块，进行对应账号的验证。"
+                f"在验证期间，自动回复功能暂时无法使用。"
+            )
+        else:
+            notification_msg = (
+                f"{title}\n\n"
+                f"账号: {self.pure_user_id}\n"
+                f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"请点击验证链接完成验证:\n{frame_url}\n\n"
+                f"在验证期间，自动回复功能暂时无法使用。"
+            )
+
+        try:
+            logger.info(f"【{self.pure_user_id}】准备发送验证通知，截图路径: {screenshot_path}, URL: {frame_url}")
+            import inspect
+
+            if inspect.iscoroutinefunction(notification_callback):
+                def run_async_callback():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(notification_callback(notification_msg, screenshot_path, frame_url))
+                        logger.info(f"【{self.pure_user_id}】✅ 异步通知回调已执行")
+                    except Exception as async_err:
+                        logger.error(f"【{self.pure_user_id}】异步通知回调执行失败: {async_err}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                    finally:
+                        loop.close()
+
+                thread = threading.Thread(target=run_async_callback, daemon=True)
+                thread.start()
+                logger.info(f"【{self.pure_user_id}】异步通知线程已启动")
+            else:
+                notification_callback(notification_msg, None, frame_url, screenshot_path)
+                logger.info(f"【{self.pure_user_id}】✅ 同步通知回调已执行")
+        except Exception as notify_err:
+            logger.error(f"【{self.pure_user_id}】发送验证通知失败: {notify_err}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    def _process_verification_requirement(
+        self,
+        context,
+        fallback_page,
+        qr_frame,
+        notification_callback: Optional[Callable] = None,
+        notification_scene: str = '账号密码登录',
+    ):
+        verification_type = 'unknown'
+        if qr_frame and hasattr(qr_frame, 'verification_type'):
+            verification_type = qr_frame.verification_type
+
+        verification_type_names = {
+            'face_verify': '人脸验证',
+            'sms_verify': '短信验证',
+            'qr_verify': '二维码验证',
+            'unknown': '身份验证',
+        }
+        type_name = verification_type_names.get(verification_type, '身份验证')
+
+        frame_url = None
+        screenshot_path = None
+        if qr_frame:
+            try:
+                if hasattr(qr_frame, 'verify_url') and qr_frame.verify_url:
+                    frame_url = qr_frame.verify_url
+                else:
+                    frame_url = qr_frame.url if hasattr(qr_frame, 'url') else None
+
+                if hasattr(qr_frame, 'screenshot_path') and qr_frame.screenshot_path:
+                    screenshot_path = qr_frame.screenshot_path
+            except Exception as e:
+                logger.warning(f"【{self.pure_user_id}】获取验证信息失败: {e}")
+
+        logger.warning(f"【{self.pure_user_id}】⚠️ 检测到{type_name}")
+        logger.info(f"【{self.pure_user_id}】请在浏览器中完成{type_name}")
+
+        if screenshot_path:
+            logger.warning(f"【{self.pure_user_id}】{'=' * 60}")
+            logger.warning(f"【{self.pure_user_id}】二维码/人脸验证截图:")
+            logger.warning(f"【{self.pure_user_id}】{screenshot_path}")
+            logger.warning(f"【{self.pure_user_id}】{'=' * 60}")
+        elif frame_url:
+            logger.warning(f"【{self.pure_user_id}】{'=' * 60}")
+            logger.warning(f"【{self.pure_user_id}】二维码/人脸验证链接:")
+            logger.warning(f"【{self.pure_user_id}】{frame_url}")
+            logger.warning(f"【{self.pure_user_id}】{'=' * 60}")
+        else:
+            logger.warning(f"【{self.pure_user_id}】{'=' * 60}")
+            logger.warning(f"【{self.pure_user_id}】二维码/人脸验证已检测到，但无法获取验证信息")
+            logger.warning(f"【{self.pure_user_id}】请在浏览器中查看验证页面")
+            logger.warning(f"【{self.pure_user_id}】{'=' * 60}")
+
+        self._notify_verification_required(
+            verification_type,
+            frame_url,
+            screenshot_path,
+            notification_callback,
+            notification_scene,
+        )
+
+        logger.info(f"【{self.pure_user_id}】等待二维码/人脸验证完成...")
+        login_success = False
+        try:
+            login_success, _ = self._wait_for_context_login(context, fallback_page, max_wait_time=450, check_interval=10)
+        finally:
+            self._cleanup_verification_screenshots()
+
+        if not login_success:
+            logger.error(f"【{self.pure_user_id}】❌ 等待验证超时（450秒）")
+            return self._fail_login(f"等待{type_name}超时（450秒）")
+
+        logger.success(f"【{self.pure_user_id}】✅ 验证成功，登录状态已确认！")
+        cookies_dict = self._snapshot_context_cookies(context)
+        if cookies_dict:
+            logger.success(f"【{self.pure_user_id}】✅ 验证后获取Cookie成功，{len(cookies_dict)}个字段")
+            return cookies_dict
+
+        logger.error(f"【{self.pure_user_id}】❌ 验证成功后未获取到Cookie")
+        return self._fail_login("验证成功后未获取到Cookie")
 
     def _has_meaningful_cookie_refresh(self, baseline: Dict[str, str], current: Dict[str, str]) -> bool:
         """判断关键 Cookie 是否发生了有意义的变化。
@@ -1767,6 +2255,29 @@ class XianyuSliderStealth:
 
         logger.warning(f"【{self.pure_user_id}】Cookie 刷新检测: 无有意义的 Cookie 变化")
         return False
+
+    def _probe_context_login_during_slider(self, fallback_page=None) -> Tuple[bool, Dict[str, str]]:
+        """刷新模式下，允许用 context 级登录态确认滑块已间接通过。"""
+        if not getattr(self, '_slider_refresh_mode', False):
+            return False, {}
+
+        if not self.context:
+            return False, {}
+
+        try:
+            login_success, _, cookies = self._probe_context_login_success(self.context, fallback_page or self.page)
+            if login_success:
+                logger.success(f"【{self.pure_user_id}】✅ 滑块阶段检测到上下文已登录，停止继续重试")
+                self.last_verification_feedback = {
+                    "status": "success",
+                    "source": "context_login_confirmed",
+                    "message": "上下文登录状态已确认"
+                }
+                return True, cookies or {}
+        except Exception as e:
+            logger.debug(f"【{self.pure_user_id}】滑块阶段探测上下文登录状态失败: {e}")
+
+        return False, {}
     
     def _get_random_browser_features(self):
         """获取随机浏览器特征 - 基于预定义 Profile 保证指纹一致性
@@ -4055,6 +4566,30 @@ class XianyuSliderStealth:
         failure_records = []
         current_strategy = 'ultra_fast_optimized'  # 优化后的极速策略
 
+        def finalize_slider_success(attempt_no: int, success_note: Optional[str] = None) -> bool:
+            if success_note:
+                logger.success(f"【{self.pure_user_id}】✅ {success_note}")
+
+            logger.info(f"【{self.pure_user_id}】✅ 滑块验证成功! (第{attempt_no}次尝试)")
+
+            strategy_stats.record_attempt(attempt_no, current_strategy, success=True)
+            logger.info(f"【{self.pure_user_id}】📊 记录策略: 第{attempt_no}次-{current_strategy}策略-成功")
+
+            if hasattr(self, 'current_trajectory_data'):
+                used_strategy = self.current_trajectory_data.get("random_params", {}).get("strategy", "unknown")
+                adaptive_strategy_manager.record_result(used_strategy, success=True)
+
+            if self.enable_learning and hasattr(self, 'current_trajectory_data'):
+                self._save_success_record(self.current_trajectory_data)
+                logger.info(f"【{self.pure_user_id}】已保存成功记录用于参数优化")
+
+            if attempt_no > 1:
+                logger.info(f"【{self.pure_user_id}】经过{attempt_no}次尝试后验证成功")
+
+            strategy_stats.log_summary()
+            logger.info(adaptive_strategy_manager.get_stats_summary())
+            return True
+
         # 快照当前 Cookie 基线（用于验证成功后判定"有意义的刷新"）
         cookie_baseline = self._snapshot_context_cookies()
         if cookie_baseline:
@@ -4124,6 +4659,11 @@ class XianyuSliderStealth:
                     if hasattr(self, '_detected_slider_frame'):
                         logger.warning(f"【{self.pure_user_id}】清除缓存的滑块位置信息，下次重试将重新全局搜索")
                         delattr(self, '_detected_slider_frame')
+
+                    context_login_success, _ = self._probe_context_login_during_slider(self.page)
+                    if context_login_success:
+                        return finalize_slider_success(attempt, "当前页面已无滑块，但上下文已确认登录")
+
                     logger.warning(f"【{self.pure_user_id}】当前页面已无滑块，不再继续同轮滑块重试")
                     break
                 
@@ -4145,12 +4685,20 @@ class XianyuSliderStealth:
                     continue
                 
                 # 5. 检查验证结果（极速模式）
-                if self.check_verification_success_fast(slider_button):
+                verification_success = self.check_verification_success_fast(slider_button)
+                if not verification_success:
+                    context_login_success, _ = self._probe_context_login_during_slider(self.page)
+                    if context_login_success:
+                        verification_success = True
+                        logger.success(f"【{self.pure_user_id}】✅ 滑块结果未明确成功，但上下文已确认登录，按成功收口")
+
+                if verification_success:
                     # 🔑 Cookie 双重校验：页面状态通过后，轮询检查关键 Cookie 是否真正刷新
                     if cookie_baseline:
                         # 先等待稳定窗口（1.2 秒），给页面回写票据留时间
                         time.sleep(1.2)
                         cookie_refreshed = False
+                        current_cookies = dict(cookie_baseline)
                         # 以 500ms 间隔轮询 x5/关键 Cookie 变化，最长等 15 秒
                         poll_interval = 0.5
                         max_poll_time = 15.0
@@ -4163,44 +4711,29 @@ class XianyuSliderStealth:
                             time.sleep(poll_interval)
 
                         if not cookie_refreshed:
-                            logger.warning(f"【{self.pure_user_id}】⚠️ 页面显示验证通过，但等待{max_poll_time}秒后关键 Cookie 仍无变化，判定为假通过")
-                            if hasattr(self, 'current_trajectory_data'):
-                                used_strategy = self.current_trajectory_data.get("random_params", {}).get("strategy", "unknown")
-                                adaptive_strategy_manager.record_result(used_strategy, success=False)
-                            strategy_stats.record_attempt(attempt, current_strategy, success=False)
-                            if attempt < max_retries:
-                                continue
+                            context_login_success, confirmed_cookies = self._probe_context_login_during_slider(self.page)
+                            if context_login_success:
+                                logger.success(
+                                    f"【{self.pure_user_id}】✅ 页面显示验证通过且上下文已确认登录，放宽 Cookie 变化校验"
+                                )
+                                cookie_refreshed = True
+                                if confirmed_cookies:
+                                    current_cookies = confirmed_cookies
                             else:
-                                break
+                                logger.warning(f"【{self.pure_user_id}】⚠️ 页面显示验证通过，但等待{max_poll_time}秒后关键 Cookie 仍无变化，判定为假通过")
+                                if hasattr(self, 'current_trajectory_data'):
+                                    used_strategy = self.current_trajectory_data.get("random_params", {}).get("strategy", "unknown")
+                                    adaptive_strategy_manager.record_result(used_strategy, success=False)
+                                strategy_stats.record_attempt(attempt, current_strategy, success=False)
+                                if attempt < max_retries:
+                                    continue
+                                else:
+                                    break
+
                         # Cookie 校验通过，更新基线
                         cookie_baseline = current_cookies
 
-                    logger.info(f"【{self.pure_user_id}】✅ 滑块验证成功! (第{attempt}次尝试)")
-                    
-                    # 📊 记录策略成功
-                    strategy_stats.record_attempt(attempt, current_strategy, success=True)
-                    logger.info(f"【{self.pure_user_id}】📊 记录策略: 第{attempt}次-{current_strategy}策略-成功")
-                    
-                    # 🤖 记录到自适应策略管理器
-                    if hasattr(self, 'current_trajectory_data'):
-                        used_strategy = self.current_trajectory_data.get("random_params", {}).get("strategy", "unknown")
-                        adaptive_strategy_manager.record_result(used_strategy, success=True)
-                    
-                    # 保存成功记录用于学习
-                    if self.enable_learning and hasattr(self, 'current_trajectory_data'):
-                        self._save_success_record(self.current_trajectory_data)
-                        logger.info(f"【{self.pure_user_id}】已保存成功记录用于参数优化")
-                    
-                    # 如果不是第一次就成功，记录重试信息
-                    if attempt > 1:
-                        logger.info(f"【{self.pure_user_id}】经过{attempt}次尝试后验证成功")
-                    
-                    # 输出当前统计摘要
-                    strategy_stats.log_summary()
-                    # 🤖 输出自适应策略统计
-                    logger.info(adaptive_strategy_manager.get_stats_summary())
-                    
-                    return True
+                    return finalize_slider_success(attempt)
                 else:
                     logger.warning(f"【{self.pure_user_id}】❌ 第{attempt}次验证失败")
                     
@@ -4430,24 +4963,20 @@ class XianyuSliderStealth:
             str: 验证类型 - 'password_error' / 'face_verify' / 'sms_verify' / 'qr_verify' / 'unknown'
         """
         try:
-            # 获取 frame 内容
-            content = ""
-            try:
-                content = frame.content()
-            except:
-                pass
+            detection_text = self._read_frame_text_for_detection(frame)
+            detection_text_lower = detection_text.lower()
 
             # 1. 检查是否是账密错误
             # 这里不要用过宽的“登录失败”做账密错误判定，mini_login 风控页也会包含该文案。
             password_error_keywords = ['账密错误', '账号密码错误', '用户名或密码错误', '密码错误', '账号或密码错误']
             for keyword in password_error_keywords:
-                if keyword in content:
+                if keyword in detection_text:
                     logger.info(f"【{self.pure_user_id}】检测到验证类型: 账密错误 (关键词: {keyword})")
                     return 'password_error'
 
             # 2. 检查是否是短信验证
             sms_keywords = ['短信验证', '验证码', '手机号', '发送验证码', '获取验证码']
-            sms_count = sum(1 for keyword in sms_keywords if keyword in content)
+            sms_count = sum(1 for keyword in sms_keywords if keyword in detection_text)
             if sms_count >= 2:  # 至少匹配2个关键词
                 logger.info(f"【{self.pure_user_id}】检测到验证类型: 短信验证")
                 return 'sms_verify'
@@ -4455,14 +4984,14 @@ class XianyuSliderStealth:
             # 3. 检查是否是二维码验证
             qr_keywords = ['扫码', '二维码', '扫一扫', '手机淘宝', '手机扫码']
             for keyword in qr_keywords:
-                if keyword in content:
+                if keyword in detection_text:
                     logger.info(f"【{self.pure_user_id}】检测到验证类型: 二维码验证 (关键词: {keyword})")
                     return 'qr_verify'
 
             # 4. 检查是否是人脸验证
-            face_keywords = ['人脸', '刷脸', '面部', '拍摄脸部', 'face']
+            face_keywords = ['人脸', '刷脸', '面部', '拍摄脸部', '刷脸验证', '人脸验证']
             for keyword in face_keywords:
-                if keyword in content.lower():
+                if keyword in detection_text_lower:
                     logger.info(f"【{self.pure_user_id}】检测到验证类型: 人脸验证 (关键词: {keyword})")
                     return 'face_verify'
 
@@ -4480,6 +5009,10 @@ class XianyuSliderStealth:
             if 'qrcode' in frame_url.lower() or 'scan' in frame_url.lower():
                 logger.info(f"【{self.pure_user_id}】检测到验证类型: 二维码验证 (URL特征)")
                 return 'qr_verify'
+
+            if any(token in frame_url.lower() for token in ('face_verify', 'faceverify', 'liveness')):
+                logger.info(f"【{self.pure_user_id}】检测到验证类型: 人脸验证 (URL特征)")
+                return 'face_verify'
 
             # 默认当作未知验证类型
             logger.info(f"【{self.pure_user_id}】无法确定验证类型，标记为未知")
@@ -4566,6 +5099,25 @@ class XianyuSliderStealth:
                     continue
 
             # 检测所有frames中的二维码/人脸验证
+            page_url = self._safe_page_url(page)
+            page_verification_type = self._detect_verification_type(page)
+            page_has_login_form = self._page_has_login_form(page)
+            if self._looks_like_verification_url(page_url) or (
+                page_verification_type in {'face_verify', 'sms_verify', 'qr_verify'} and not page_has_login_form
+            ):
+                if page_verification_type == 'password_error':
+                    logger.error(f"【{self.pure_user_id}】❌ 顶层页面判定为账号密码错误")
+                    raise PasswordLoginVerificationError("账号密码错误，请检查账号密码是否正确")
+
+                logger.info(f"【{self.pure_user_id}】✅ 顶层页面命中验证特征，URL: {page_url}")
+                verification_screenshot = self._capture_verification_screenshot(page)
+                return True, VerificationFrameWrapper(
+                    page,
+                    verification_type=page_verification_type,
+                    verify_url=page_url or None,
+                    screenshot_path=verification_screenshot
+                )
+
             # 首先检查是否有 alibaba-login-box iframe（人脸验证或短信验证）
             try:
                 iframes = page.query_selector_all('iframe')
@@ -4956,6 +5508,8 @@ class XianyuSliderStealth:
         """
         try:
             self.last_login_error = ""
+            previous_slider_refresh_mode = getattr(self, '_slider_refresh_mode', False)
+            self._slider_refresh_mode = force_clean_context
 
             # 检查日期有效性
             if not self._check_date_validity():
@@ -4968,6 +5522,7 @@ class XianyuSliderStealth:
                 return self._fail_login("账号或密码不能为空")
             
             browser_mode = "有头" if show_browser else "无头"
+            notification_scene = "手动刷新Cookie" if force_clean_context else "账号密码登录"
             logger.info(f"【{self.pure_user_id}】开始{browser_mode}模式密码登录流程（使用Playwright）...")
             logger.info(f"【{self.pure_user_id}】账号: {account}")
             logger.info("=" * 60)
@@ -5247,6 +5802,24 @@ class XianyuSliderStealth:
                     self.playwright = playwright
                     
                     try:
+                        monitor_page = self._select_monitor_page(context, page)
+
+                        has_error, error_message = self._check_login_error(monitor_page)
+                        if has_error:
+                            logger.error(f"【{self.pure_user_id}】❌ 登录失败：{error_message}")
+                            raise Exception(error_message if error_message else "登录失败，请检查账号密码是否正确")
+
+                        has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
+                        if has_qr:
+                            logger.warning(f"【{self.pure_user_id}】检测到前置身份验证，直接进入验证等待流程")
+                            return self._process_verification_requirement(
+                                context,
+                                monitor_page,
+                                qr_frame,
+                                notification_callback,
+                                notification_scene,
+                            )
+
                         # 检测滑块元素（在主页面和所有frame中查找）
                         slider_selectors = [
                             '#nc_1_n1z',
@@ -5341,127 +5914,42 @@ class XianyuSliderStealth:
                             time.sleep(3)
                             
                             # 第一次检查登录状态
-                            login_success = self._check_login_success_by_element(page)
+                            login_success, active_page, _ = self._probe_context_login_success(context, page)
                             
                             # 如果第一次没检测到，再等待5秒后重试
                             if not login_success:
                                 logger.info(f"【{self.pure_user_id}】第一次检测未发现登录状态，等待5秒后重试...")
                                 time.sleep(5)
-                                login_success = self._check_login_success_by_element(page)
+                                login_success, active_page, _ = self._probe_context_login_success(context, active_page or page)
                             
                             if login_success:
                                 logger.success(f"【{self.pure_user_id}】✅ 滑块验证后登录成功")
                                 
                                 # 只有在登录成功后才获取Cookie
-                                cookies_dict = {}
-                                try:
-                                    cookies_list = context.cookies()
-                                    for cookie in cookies_list:
-                                        cookies_dict[cookie.get('name', '')] = cookie.get('value', '')
-                                    
-                                    logger.info(f"【{self.pure_user_id}】成功获取Cookie，包含 {len(cookies_dict)} 个字段")
-                                    
-                                    if cookies_dict:
-                                        logger.success("✅ Cookie有效")
-                                        return cookies_dict
-                                    else:
-                                        logger.error("❌ Cookie为空")
-                                        return self._fail_login("登录成功后未获取到有效Cookie")
-                                except Exception as e:
-                                    logger.error(f"【{self.pure_user_id}】获取Cookie失败: {e}")
-                                    return self._fail_login("登录成功后获取Cookie失败")
+                                cookies_dict = self._snapshot_context_cookies(context)
+                                logger.info(f"【{self.pure_user_id}】成功获取Cookie，包含 {len(cookies_dict)} 个字段")
+
+                                if cookies_dict:
+                                    logger.success("✅ Cookie有效")
+                                    return cookies_dict
+
+                                logger.error("❌ Cookie为空")
+                                return self._fail_login("登录成功后未获取到有效Cookie")
                             else:
                                 # 滑块验证后登录状态不明确，检测是否需要人脸/短信/二维码验证
                                 logger.warning(f"【{self.pure_user_id}】⚠️ 滑块验证后登录状态不明确，检测是否需要身份验证...")
                                 time.sleep(1)
-                                has_qr, qr_frame = self._detect_qr_code_verification(page)
+                                monitor_page = self._select_monitor_page(context, page)
+                                has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
 
                                 if has_qr:
-                                    # 检测到人脸/短信/二维码验证，发送通知并等待
-                                    verification_type = 'unknown'
-                                    if qr_frame and hasattr(qr_frame, 'verification_type'):
-                                        verification_type = qr_frame.verification_type
-
-                                    type_name = {'face_verify': '人脸验证', 'sms_verify': '短信验证',
-                                                 'qr_verify': '二维码验证'}.get(verification_type, '身份验证')
-                                    logger.warning(f"【{self.pure_user_id}】⚠️ 检测到{type_name}，等待用户完成...")
-
-                                    # 获取验证链接和截图
-                                    frame_url = None
-                                    screenshot_path = None
-                                    if qr_frame:
-                                        try:
-                                            if hasattr(qr_frame, 'verify_url') and qr_frame.verify_url:
-                                                frame_url = qr_frame.verify_url
-                                            else:
-                                                frame_url = qr_frame.url if hasattr(qr_frame, 'url') else None
-                                            if hasattr(qr_frame, 'screenshot_path') and qr_frame.screenshot_path:
-                                                screenshot_path = qr_frame.screenshot_path
-                                        except Exception:
-                                            pass
-
-                                    # 发送通知
-                                    if notification_callback and (screenshot_path or frame_url):
-                                        try:
-                                            notification_msg = (
-                                                f"⚠️ 手动刷新Cookie需要{type_name}\n\n"
-                                                f"账号: {self.pure_user_id}\n"
-                                                f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                                                f"请登录自动化网站完成验证。"
-                                            )
-                                            import inspect
-                                            if inspect.iscoroutinefunction(notification_callback):
-                                                def _run_cb():
-                                                    _loop = asyncio.new_event_loop()
-                                                    asyncio.set_event_loop(_loop)
-                                                    try:
-                                                        _loop.run_until_complete(notification_callback(notification_msg, screenshot_path, frame_url))
-                                                    except Exception:
-                                                        pass
-                                                    finally:
-                                                        _loop.close()
-                                                import threading
-                                                threading.Thread(target=_run_cb, daemon=True).start()
-                                            else:
-                                                notification_callback(notification_msg, None, frame_url, screenshot_path)
-                                            logger.info(f"【{self.pure_user_id}】✅ 已发送{type_name}通知")
-                                        except Exception as notify_e:
-                                            logger.warning(f"【{self.pure_user_id}】发送通知失败: {notify_e}")
-
-                                    # 等待用户完成验证（每10秒检查，最长7.5分钟）
-                                    check_interval = 10
-                                    max_wait_time = 450
-                                    waited_time = 0
-                                    login_success = False
-
-                                    while waited_time < max_wait_time:
-                                        time.sleep(check_interval)
-                                        waited_time += check_interval
-                                        try:
-                                            if self._check_login_success_by_element(page):
-                                                logger.success(f"【{self.pure_user_id}】✅ 验证成功，登录状态已确认！")
-                                                login_success = True
-                                                break
-                                            else:
-                                                logger.info(f"【{self.pure_user_id}】等待验证中... ({waited_time}秒/{max_wait_time}秒)")
-                                        except Exception:
-                                            pass
-
-                                    if login_success:
-                                        cookies_dict = {}
-                                        try:
-                                            cookies_list = context.cookies()
-                                            for cookie in cookies_list:
-                                                cookies_dict[cookie.get('name', '')] = cookie.get('value', '')
-                                            if cookies_dict:
-                                                logger.success(f"【{self.pure_user_id}】✅ 验证后获取Cookie成功，{len(cookies_dict)}个字段")
-                                                return cookies_dict
-                                            else:
-                                                return self._fail_login("验证成功但Cookie为空")
-                                        except Exception as e:
-                                            return self._fail_login(f"验证成功后获取Cookie失败: {e}")
-                                    else:
-                                        return self._fail_login(f"等待{type_name}超时（{max_wait_time}秒）")
+                                    return self._process_verification_requirement(
+                                        context,
+                                        monitor_page,
+                                        qr_frame,
+                                        notification_callback,
+                                        notification_scene,
+                                    )
                                 else:
                                     logger.warning(f"【{self.pure_user_id}】⚠️ 未检测到身份验证，登录状态不明确")
                                     return self._fail_login("滑块验证后登录状态未确认，请稍后重试")
@@ -5469,28 +5957,31 @@ class XianyuSliderStealth:
                             logger.info(f"【{self.pure_user_id}】未检测到滑块验证")
 
                             # 未检测到滑块时，检查是否已登录
-                            if self._check_login_success_by_element(page):
+                            login_success, active_page, _ = self._probe_context_login_success(context, page)
+                            if login_success:
                                 logger.success(f"【{self.pure_user_id}】✅ 检测到已登录状态")
                                 
                                 # 只有在登录成功后才获取Cookie
-                                cookies_dict = {}
-                                try:
-                                    cookies_list = context.cookies()
-                                    for cookie in cookies_list:
-                                        cookies_dict[cookie.get('name', '')] = cookie.get('value', '')
-                                    
-                                    logger.info(f"【{self.pure_user_id}】成功获取Cookie，包含 {len(cookies_dict)} 个字段")
-                                    
-                                    if cookies_dict:
-                                        logger.success("✅ Cookie有效")
-                                        return cookies_dict
-                                    else:
-                                        logger.error("❌ Cookie为空")
-                                        return self._fail_login("未获取到有效Cookie")
-                                except Exception as e:
-                                    logger.error(f"【{self.pure_user_id}】获取Cookie失败: {e}")
-                                    return self._fail_login("获取Cookie失败")
+                                cookies_dict = self._snapshot_context_cookies(context)
+                                logger.info(f"【{self.pure_user_id}】成功获取Cookie，包含 {len(cookies_dict)} 个字段")
+
+                                if cookies_dict:
+                                    logger.success("✅ Cookie有效")
+                                    return cookies_dict
+
+                                logger.error("❌ Cookie为空")
+                                return self._fail_login("未获取到有效Cookie")
                             else:
+                                monitor_page = self._select_monitor_page(context, active_page or page)
+                                has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
+                                if has_qr:
+                                    return self._process_verification_requirement(
+                                        context,
+                                        monitor_page,
+                                        qr_frame,
+                                        notification_callback,
+                                        notification_scene,
+                                    )
                                 logger.warning(f"【{self.pure_user_id}】⚠️ 未检测到滑块且未登录，不获取Cookie")
                                 return self._fail_login("未检测到登录表单或有效登录态")
                     
@@ -5509,25 +6000,18 @@ class XianyuSliderStealth:
                     time.sleep(2)
                     
                     # 检查是否已登录（只有过了滑块才会有这个元素）
-                    if self._check_login_success_by_element(page):
+                    login_success, active_page, _ = self._probe_context_login_success(context, page)
+                    if login_success:
                         logger.success(f"【{self.pure_user_id}】✅ 检测到已登录状态")
                         
                         # 获取Cookie
-                        cookies_dict = {}
-                        try:
-                            cookies_list = context.cookies()
-                            for cookie in cookies_list:
-                                cookies_dict[cookie.get('name', '')] = cookie.get('value', '')
-                            
-                            if cookies_dict:
-                                logger.success("✅ 登录成功！Cookie有效")
-                                return cookies_dict
-                            else:
-                                logger.error("❌ Cookie为空")
-                                return None
-                        except Exception as e:
-                            logger.error(f"【{self.pure_user_id}】获取Cookie失败: {e}")
-                            return None
+                        cookies_dict = self._snapshot_context_cookies(context)
+                        if cookies_dict:
+                            logger.success("✅ 登录成功！Cookie有效")
+                            return cookies_dict
+
+                        logger.error("❌ Cookie为空")
+                        return None
                     else:
                         logger.error(f"【{self.pure_user_id}】❌ 未找到登录表单且未检测到已登录")
                         return self._fail_login("未找到登录表单且未检测到已登录状态")
@@ -5696,7 +6180,7 @@ class XianyuSliderStealth:
                     # 检查登录状态
                     logger.info(f"【{self.pure_user_id}】等待1秒后检查登录状态...")
                     time.sleep(1)
-                    login_success = self._check_login_success_by_element(page)
+                    login_success, active_page, _ = self._probe_context_login_success(context, page)
                     
                     if login_success:
                         logger.success(f"【{self.pure_user_id}】✅ 登录验证成功！")
@@ -5704,7 +6188,8 @@ class XianyuSliderStealth:
                         # 检查是否有账密错误
                         logger.info(f"【{self.pure_user_id}】等待1秒后检查是否有账密错误...")
                         time.sleep(1)
-                        has_error, error_message = self._check_login_error(page)
+                        monitor_page = self._select_monitor_page(context, active_page or page)
+                        has_error, error_message = self._check_login_error(monitor_page)
                         if has_error:
                             logger.error(f"【{self.pure_user_id}】❌ 登录失败：{error_message}")
                             # 抛出异常，包含错误消息，让调用者能够获取
@@ -5715,14 +6200,15 @@ class XianyuSliderStealth:
                         logger.info(f"【{self.pure_user_id}】等待1秒后检测是否需要二维码/人脸验证...")
                         time.sleep(1)
                         logger.info(f"【{self.pure_user_id}】检测是否需要二维码/人脸验证...")
-                        has_qr, qr_frame = self._detect_qr_code_verification(page)
+                        monitor_page = self._select_monitor_page(context, active_page or page)
+                        has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
                         
                         # 如果检测到滑块并已处理，再次检查登录状态
                         if not has_qr:
                             # 滑块可能已被处理，再次检查登录状态
                             logger.info(f"【{self.pure_user_id}】等待1秒后再次检查登录状态...")
                             time.sleep(1)
-                            login_success_after_slider = self._check_login_success_by_element(page)
+                            login_success_after_slider, active_page, _ = self._probe_context_login_success(context, monitor_page)
                             if login_success_after_slider:
                                 logger.success(f"【{self.pure_user_id}】✅ 滑块验证后，登录验证成功！")
                                 login_success = True
@@ -5731,274 +6217,23 @@ class XianyuSliderStealth:
                                 logger.info(f"【{self.pure_user_id}】等待1秒后继续检测是否需要二维码/人脸验证...")
                                 time.sleep(1)
                                 logger.info(f"【{self.pure_user_id}】滑块验证后，继续检测是否需要二维码/人脸验证...")
-                                has_qr, qr_frame = self._detect_qr_code_verification(page)
+                                monitor_page = self._select_monitor_page(context, active_page or monitor_page)
+                                has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
                         
                         if has_qr:
-                            # 获取验证类型
-                            verification_type = 'unknown'
-                            if qr_frame and hasattr(qr_frame, 'verification_type'):
-                                verification_type = qr_frame.verification_type
-
-                            # 根据验证类型输出不同的日志
-                            verification_type_names = {
-                                'face_verify': '人脸验证',
-                                'sms_verify': '短信验证',
-                                'qr_verify': '二维码验证',
-                                'unknown': '身份验证'
-                            }
-                            type_name = verification_type_names.get(verification_type, '身份验证')
-                            logger.warning(f"【{self.pure_user_id}】⚠️ 检测到{type_name}")
-                            logger.info(f"【{self.pure_user_id}】请在浏览器中完成{type_name}")
-                            
-                            # 获取验证链接URL和截图路径
-                            frame_url = None
-                            screenshot_path = None
-                            if qr_frame:
-                                try:
-                                    # 检查是否有验证链接（从VerificationFrame对象）
-                                    if hasattr(qr_frame, 'verify_url') and qr_frame.verify_url:
-                                        frame_url = qr_frame.verify_url
-                                        logger.info(f"【{self.pure_user_id}】使用获取到的人脸验证链接: {frame_url}")
-                                    else:
-                                        frame_url = qr_frame.url if hasattr(qr_frame, 'url') else None
-                                    
-                                    # 检查是否有截图路径（从VerificationFrame对象）
-                                    if hasattr(qr_frame, 'screenshot_path') and qr_frame.screenshot_path:
-                                        screenshot_path = qr_frame.screenshot_path
-                                        logger.info(f"【{self.pure_user_id}】使用获取到的人脸验证截图: {screenshot_path}")
-                                except Exception as e:
-                                    logger.warning(f"【{self.pure_user_id}】获取frame信息失败: {e}")
-                                    import traceback
-                                    logger.debug(traceback.format_exc())
-                            
-                            # 显示验证信息
-                            if screenshot_path:
-                                logger.warning(f"【{self.pure_user_id}】" + "=" * 60)
-                                logger.warning(f"【{self.pure_user_id}】二维码/人脸验证截图:")
-                                logger.warning(f"【{self.pure_user_id}】{screenshot_path}")
-                                logger.warning(f"【{self.pure_user_id}】" + "=" * 60)
-                            elif frame_url:
-                                logger.warning(f"【{self.pure_user_id}】" + "=" * 60)
-                                logger.warning(f"【{self.pure_user_id}】二维码/人脸验证链接:")
-                                logger.warning(f"【{self.pure_user_id}】{frame_url}")
-                                logger.warning(f"【{self.pure_user_id}】" + "=" * 60)
-                            else:
-                                logger.warning(f"【{self.pure_user_id}】" + "=" * 60)
-                                logger.warning(f"【{self.pure_user_id}】二维码/人脸验证已检测到，但无法获取验证信息")
-                                logger.warning(f"【{self.pure_user_id}】请在浏览器中查看验证页面")
-                                logger.warning(f"【{self.pure_user_id}】" + "=" * 60)
-                            
-                            logger.info(f"【{self.pure_user_id}】请在浏览器中完成验证，程序将持续等待...")
-
-                            # 【重要】发送通知给客户
-                            if notification_callback:
-                                try:
-                                    if screenshot_path or frame_url:
-                                        # 根据验证类型构造不同的通知消息
-                                        verification_type_titles = {
-                                            'face_verify': '⚠️ 账号密码登录需要人脸验证',
-                                            'sms_verify': '⚠️ 账号密码登录需要短信验证',
-                                            'qr_verify': '⚠️ 账号密码登录需要二维码验证',
-                                            'unknown': '⚠️ 账号密码登录需要身份验证'
-                                        }
-                                        title = verification_type_titles.get(verification_type, '⚠️ 账号密码登录需要身份验证')
-
-                                        if screenshot_path:
-                                            notification_msg = (
-                                                f"{title}\n\n"
-                                                f"账号: {self.pure_user_id}\n"
-                                                f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                                                f"请登录自动化网站，访问账号管理模块，进行对应账号的验证。"
-                                                f"在验证期间，自动回复功能暂时无法使用。"
-                                            )
-                                        else:
-                                            notification_msg = (
-                                                f"{title}\n\n"
-                                                f"账号: {self.pure_user_id}\n"
-                                                f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                                                f"请点击验证链接完成验证:\n{frame_url}\n\n"
-                                                f"在验证期间，自动回复功能暂时无法使用。"
-                                            )
-
-                                        logger.info(f"【{self.pure_user_id}】准备发送{type_name}通知，截图路径: {screenshot_path}, URL: {frame_url}")
-                                        
-                                        # 如果回调是异步函数，使用 asyncio.run 在新的事件循环中运行
-                                        import asyncio
-                                        import inspect
-                                        if inspect.iscoroutinefunction(notification_callback):
-                                            # 在新的线程中运行异步回调，避免阻塞
-                                            def run_async_callback():
-                                                loop = asyncio.new_event_loop()
-                                                asyncio.set_event_loop(loop)
-                                                try:
-                                                    # 传递通知消息、截图路径和URL给回调
-                                                    # 参数顺序：message, screenshot_path, verification_url
-                                                    loop.run_until_complete(notification_callback(notification_msg, screenshot_path, frame_url))
-                                                    logger.info(f"【{self.pure_user_id}】✅ 异步通知回调已执行")
-                                                except Exception as async_err:
-                                                    logger.error(f"【{self.pure_user_id}】异步通知回调执行失败: {async_err}")
-                                                    import traceback
-                                                    logger.error(traceback.format_exc())
-                                                finally:
-                                                    loop.close()
-                                            
-                                            import threading
-                                            thread = threading.Thread(target=run_async_callback)
-                                            thread.start()
-                                            logger.info(f"【{self.pure_user_id}】异步通知线程已启动")
-                                            # 不等待线程完成，让通知在后台发送
-                                        else:
-                                            # 同步回调直接调用（传递通知消息、截图路径和URL）
-                                            notification_callback(notification_msg, None, frame_url, screenshot_path)
-                                            logger.info(f"【{self.pure_user_id}】✅ 同步通知回调已执行")
-                                    else:
-                                        logger.warning(f"【{self.pure_user_id}】无法获取验证信息，跳过通知发送")
-                                        
-                                except Exception as notify_err:
-                                    logger.error(f"【{self.pure_user_id}】发送人脸验证通知失败: {notify_err}")
-                                    import traceback
-                                    logger.error(traceback.format_exc())
-                            else:
-                                logger.warning(f"【{self.pure_user_id}】⚠️ notification_callback 未提供，无法发送通知")
-                                logger.warning(f"【{self.pure_user_id}】请确保调用 login_with_password_playwright 时传入 notification_callback 参数")
-                            
-                            # 持续等待用户完成二维码/人脸验证
-                            logger.info(f"【{self.pure_user_id}】等待二维码/人脸验证完成...")
-                            check_interval = 10  # 每10秒检查一次
-                            max_wait_time = 450  # 最多等待7.5分钟
-                            waited_time = 0
-                            
-                            while waited_time < max_wait_time:
-                                time.sleep(check_interval)
-                                waited_time += check_interval
-                                
-                                # 先检测是否有滑块，如果有就处理
-                                try:
-                                    logger.debug(f"【{self.pure_user_id}】检测是否存在滑块...")
-                                    slider_detected = False
-                                    
-                                    # 快速检测滑块元素（不等待，仅检测）
-                                    slider_selectors = [
-                                        "#nc_1_n1z",
-                                        ".nc-container",
-                                        "#baxia-dialog-content",
-                                        ".nc_wrapper",
-                                        "#nocaptcha"
-                                    ]
-                                    
-                                    # 先在主页面检测
-                                    for selector in slider_selectors:
-                                        try:
-                                            element = page.query_selector(selector)
-                                            if element and element.is_visible():
-                                                slider_detected = True
-                                                logger.info(f"【{self.pure_user_id}】🔍 检测到滑块元素: {selector}")
-                                                break
-                                        except:
-                                            pass
-                                    
-                                    # 如果主页面没找到，检查所有frame
-                                    if not slider_detected:
-                                        try:
-                                            frames = page.frames
-                                            for frame in frames:
-                                                for selector in slider_selectors:
-                                                    try:
-                                                        element = frame.query_selector(selector)
-                                                        if element and element.is_visible():
-                                                            slider_detected = True
-                                                            logger.info(f"【{self.pure_user_id}】🔍 在frame中检测到滑块元素: {selector}")
-                                                            break
-                                                    except:
-                                                        pass
-                                                if slider_detected:
-                                                    break
-                                        except:
-                                            pass
-                                    
-                                    # 如果检测到滑块，尝试处理
-                                    if slider_detected:
-                                        logger.info(f"【{self.pure_user_id}】⚡ 检测到滑块，开始自动处理...")
-                                        time.sleep(3)
-                                        try:
-                                            # 调用滑块处理方法（使用快速模式，因为已确认滑块存在）
-                                            # 最多尝试3次，因为同一个页面连续失败3次后就不会成功了
-                                            if self.solve_slider(max_retries=3, fast_mode=True):
-                                                logger.success(f"【{self.pure_user_id}】✅ 滑块处理成功！")
-                                                
-                                                # 滑块处理成功后，刷新页面
-                                                try:
-                                                    logger.info(f"【{self.pure_user_id}】🔄 滑块处理成功，刷新页面...")
-                                                    page.reload(wait_until="domcontentloaded", timeout=30000)
-                                                    logger.info(f"【{self.pure_user_id}】✅ 页面刷新完成")
-                                                    # 刷新后短暂等待，让页面稳定
-                                                    time.sleep(2)
-                                                except Exception as reload_err:
-                                                    logger.warning(f"【{self.pure_user_id}】⚠️ 页面刷新失败: {reload_err}")
-                                            else:
-                                                # 3次都失败了，刷新页面后再尝试一次
-                                                logger.warning(f"【{self.pure_user_id}】⚠️ 滑块处理3次都失败，刷新页面后重试...")
-                                                try:
-                                                    logger.info(f"【{self.pure_user_id}】🔄 刷新页面以重置滑块状态...")
-                                                    page.reload(wait_until="domcontentloaded", timeout=30000)
-                                                    logger.info(f"【{self.pure_user_id}】✅ 页面刷新完成")
-                                                    time.sleep(2)
-                                                    
-                                                    # 刷新后再次尝试处理滑块（给一次机会）
-                                                    logger.info(f"【{self.pure_user_id}】🔄 页面刷新后，再次尝试处理滑块...")
-                                                    if self.solve_slider(max_retries=3, fast_mode=True):
-                                                        logger.success(f"【{self.pure_user_id}】✅ 刷新后滑块处理成功！")
-                                                    else:
-                                                        logger.error(f"【{self.pure_user_id}】❌ 刷新后滑块处理仍然失败，继续等待...")
-                                                except Exception as reload_err:
-                                                    logger.warning(f"【{self.pure_user_id}】⚠️ 页面刷新失败: {reload_err}")
-                                        except Exception as slider_err:
-                                            logger.warning(f"【{self.pure_user_id}】⚠️ 滑块处理出错: {slider_err}")
-                                            logger.debug(traceback.format_exc())
-                                except Exception as e:
-                                    logger.debug(f"【{self.pure_user_id}】滑块检测时出错: {e}")
-                                
-                                # 检查登录状态（通过页面元素）
-                                try:
-                                    if self._check_login_success_by_element(page):
-                                        logger.success(f"【{self.pure_user_id}】✅ 验证成功，登录状态已确认！")
-                                        login_success = True
-                                        break
-                                    else:
-                                        logger.info(f"【{self.pure_user_id}】等待验证中... (已等待{waited_time}秒/{max_wait_time}秒)")
-                                except Exception as e:
-                                    logger.debug(f"【{self.pure_user_id}】检查登录状态时出错: {e}")
-                            
-                            # 删除截图（无论成功或失败）
-                            if screenshot_path:
-                                try:
-                                    import glob
-                                    # 删除该账号的所有验证截图
-                                    screenshots_dir = "static/uploads/images"
-                                    all_screenshots = glob.glob(os.path.join(screenshots_dir, f"face_verify_{self.pure_user_id}_*.jpg"))
-                                    for screenshot_file in all_screenshots:
-                                        try:
-                                            if os.path.exists(screenshot_file):
-                                                os.remove(screenshot_file)
-                                                logger.info(f"【{self.pure_user_id}】✅ 已删除验证截图: {screenshot_file}")
-                                            else:
-                                                logger.warning(f"【{self.pure_user_id}】⚠️ 截图文件不存在: {screenshot_file}")
-                                        except Exception as e:
-                                            logger.warning(f"【{self.pure_user_id}】⚠️ 删除截图失败: {e}")
-                                except Exception as e:
-                                    logger.error(f"【{self.pure_user_id}】删除截图时出错: {e}")
-                            
-                            if login_success:
-                                logger.info(f"【{self.pure_user_id}】二维码/人脸验证已完成")
-                            else:
-                                logger.error(f"【{self.pure_user_id}】❌ 等待验证超时（{max_wait_time}秒）")
-                                return self._fail_login("等待身份验证超时，请稍后重试")
+                            return self._process_verification_requirement(
+                                context,
+                                monitor_page,
+                                qr_frame,
+                                notification_callback,
+                                notification_scene,
+                            )
                         else:
                             logger.info(f"【{self.pure_user_id}】未检测到二维码/人脸验证")
                             # 再次检查登录状态，确保登录成功
                             logger.info(f"【{self.pure_user_id}】等待1秒后再次检查登录状态...")
                             time.sleep(1)
-                            login_success = self._check_login_success_by_element(page)
+                            login_success, active_page, _ = self._probe_context_login_success(context, active_page or page)
                             if not login_success:
                                 logger.error(f"【{self.pure_user_id}】❌ 登录状态未确认，无法获取Cookie")
                                 return self._fail_login("登录状态未确认，无法获取Cookie")
@@ -6089,6 +6324,7 @@ class XianyuSliderStealth:
                 return self._fail_login("页面会话已失效，请重新尝试刷新Cookie")
             return self._fail_login(error_message if error_message else "密码登录流程异常")
         finally:
+            self._slider_refresh_mode = previous_slider_refresh_mode
             # 最外层 finally：确保任何退出路径都释放并发槽位
             try:
                 concurrency_manager.unregister_instance(self.user_id)

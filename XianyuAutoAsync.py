@@ -4509,10 +4509,14 @@ class XianyuLive:
                         res_json_str = json.dumps(res_json, ensure_ascii=False, separators=(',', ':'))
                         if '令牌过期' in res_json_str or 'Session过期' in res_json_str:
                             # 记录令牌/Session过期到风控日志
+                            token_expired_log_id = None
                             try:
                                 from db_manager import db_manager
+                                stale_count = db_manager.mark_stale_risk_control_logs_failed(timeout_minutes=15, cookie_id=self.cookie_id)
+                                if stale_count > 0:
+                                    logger.warning(f"【{self.cookie_id}】检测到{stale_count}条超时processing风控日志，已自动标记failed")
                                 expire_type = '令牌过期' if '令牌过期' in res_json_str else 'Session过期'
-                                db_manager.add_risk_control_log(
+                                token_expired_log_id = db_manager.add_risk_control_log(
                                     cookie_id=self.cookie_id,
                                     event_type='token_expired',
                                     event_description=f"检测到{expire_type}，准备刷新Cookie并重启实例",
@@ -4524,10 +4528,38 @@ class XianyuLive:
                             # 调用统一的密码登录刷新方法
                             if self.is_manual_refresh_active(self.cookie_id):
                                 logger.warning(f"【{self.cookie_id}】检测到手动刷新进行中，跳过自动密码登录刷新")
+                                if token_expired_log_id:
+                                    try:
+                                        from db_manager import db_manager
+                                        db_manager.update_risk_control_log(
+                                            log_id=token_expired_log_id,
+                                            processing_status='failed',
+                                            error_message='检测到手动刷新进行中，自动刷新已跳过'
+                                        )
+                                    except Exception as update_e:
+                                        logger.error(f"【{self.cookie_id}】更新令牌过期风控日志失败: {update_e}")
                                 notification_sent = True
                                 return None
 
                             refresh_success = await self._try_password_login_refresh("令牌/Session过期")
+                            
+                            if token_expired_log_id:
+                                try:
+                                    from db_manager import db_manager
+                                    if refresh_success:
+                                        db_manager.update_risk_control_log(
+                                            log_id=token_expired_log_id,
+                                            processing_status='success',
+                                            processing_result='令牌/Session过期触发自动刷新成功，已进入重试流程'
+                                        )
+                                    else:
+                                        db_manager.update_risk_control_log(
+                                            log_id=token_expired_log_id,
+                                            processing_status='failed',
+                                            error_message='令牌/Session过期触发自动刷新失败'
+                                        )
+                                except Exception as update_e:
+                                    logger.error(f"【{self.cookie_id}】更新令牌过期风控日志失败: {update_e}")
                             
                             if not refresh_success:
                                 # 标记已发送通知，避免重复通知
@@ -5037,8 +5069,33 @@ class XianyuLive:
         """
         logger.warning(f"【{self.cookie_id}】检测到{trigger_reason}，准备刷新Cookie并重启实例...")
 
+        # 记录到风控日志
+        refresh_risk_log_id = None
+        try:
+            from db_manager import db_manager
+            stale_count = db_manager.mark_stale_risk_control_logs_failed(timeout_minutes=15, cookie_id=self.cookie_id)
+            if stale_count > 0:
+                logger.warning(f"【{self.cookie_id}】检测到{stale_count}条超时processing风控日志，已自动标记failed")
+            refresh_risk_log_id = db_manager.add_risk_control_log(
+                cookie_id=self.cookie_id,
+                event_type='cookie_refresh',
+                event_description=f"{trigger_reason}触发Cookie刷新和实例重启",
+                processing_status='processing'
+            )
+        except Exception as log_e:
+            logger.error(f"【{self.cookie_id}】记录风控日志失败: {log_e}")
+
         if self.is_manual_refresh_active(self.cookie_id):
             logger.warning(f"【{self.cookie_id}】手动刷新进行中，跳过自动密码登录刷新")
+            if refresh_risk_log_id:
+                try:
+                    db_manager.update_risk_control_log(
+                        log_id=refresh_risk_log_id,
+                        processing_status='failed',
+                        error_message='手动刷新进行中，自动密码登录刷新已跳过'
+                    )
+                except Exception:
+                    pass
             return False
 
         # 检查是否在密码登录冷却期内，避免重复登录
@@ -5050,6 +5107,15 @@ class XianyuLive:
                 logger.warning(
                     f"【{self.cookie_id}】密码登录失败退避中（原因: {failure_backoff.get('reason', 'unknown')}），还需等待 {remaining_time:.1f} 秒"
                 )
+                if refresh_risk_log_id:
+                    try:
+                        db_manager.update_risk_control_log(
+                            log_id=refresh_risk_log_id,
+                            processing_status='failed',
+                            error_message=f"密码登录失败退避中，剩余{remaining_time:.1f}秒"
+                        )
+                    except Exception:
+                        pass
                 return False
 
         last_password_login = XianyuLive._last_password_login_time.get(self.cookie_id, 0)
@@ -5059,23 +5125,20 @@ class XianyuLive:
             remaining_time = XianyuLive._password_login_cooldown - time_since_last_login
             logger.warning(f"【{self.cookie_id}】距离上次密码登录仅 {time_since_last_login:.1f} 秒，仍在冷却期内（还需等待 {remaining_time:.1f} 秒），跳过密码登录")
             logger.warning(f"【{self.cookie_id}】提示：如果新Cookie仍然无效，请检查账号状态或手动更新Cookie")
+            if refresh_risk_log_id:
+                try:
+                    db_manager.update_risk_control_log(
+                        log_id=refresh_risk_log_id,
+                        processing_status='failed',
+                        error_message=f"密码登录冷却期内，剩余{remaining_time:.1f}秒"
+                    )
+                except Exception:
+                    pass
             return False
 
         # 记录到日志文件
         log_captcha_event(self.cookie_id, f"{trigger_reason}触发Cookie刷新和实例重启", None,
             f"检测到{trigger_reason}，准备刷新Cookie并重启实例")
-
-        # 记录到风控日志
-        try:
-            from db_manager import db_manager
-            db_manager.add_risk_control_log(
-                cookie_id=self.cookie_id,
-                event_type='cookie_refresh',
-                event_description=f"{trigger_reason}触发Cookie刷新和实例重启",
-                processing_status='processing'
-            )
-        except Exception as log_e:
-            logger.error(f"【{self.cookie_id}】记录风控日志失败: {log_e}")
 
         try:
             # 从数据库获取账号登录信息
@@ -5084,6 +5147,15 @@ class XianyuLive:
             
             if not account_info:
                 logger.error(f"【{self.cookie_id}】无法获取账号信息")
+                if refresh_risk_log_id:
+                    try:
+                        db_manager.update_risk_control_log(
+                            log_id=refresh_risk_log_id,
+                            processing_status='failed',
+                            error_message='无法获取账号信息'
+                        )
+                    except Exception:
+                        pass
                 return False
             
             # 【重要】先检查数据库中的cookie是否已经更新
@@ -5094,6 +5166,15 @@ class XianyuLive:
                 self.cookies_str = db_cookie_value
                 self.cookies = trans_cookies(self.cookies_str)
                 logger.info(f"【{self.cookie_id}】Cookie已从数据库重新加载，跳过密码登录刷新")
+                if refresh_risk_log_id:
+                    try:
+                        db_manager.update_risk_control_log(
+                            log_id=refresh_risk_log_id,
+                            processing_status='success',
+                            processing_result='检测到数据库Cookie已更新，自动刷新流程跳过'
+                        )
+                    except Exception:
+                        pass
                 return True
             
             username = account_info.get('username', '')
@@ -5107,6 +5188,15 @@ class XianyuLive:
                     f"检测到{trigger_reason}，但未配置用户名或密码，无法自动刷新Cookie",
                     "no_credentials"
                 )
+                if refresh_risk_log_id:
+                    try:
+                        db_manager.update_risk_control_log(
+                            log_id=refresh_risk_log_id,
+                            processing_status='failed',
+                            error_message='未配置用户名或密码，无法自动刷新Cookie'
+                        )
+                    except Exception:
+                        pass
                 return False
             
             # 使用集成的 Playwright 登录方法（无需猴子补丁）
@@ -5186,10 +5276,28 @@ class XianyuLive:
                 
                 if update_success:
                     logger.info(f"【{self.cookie_id}】Cookie更新并重启任务成功")
-                    # ⚠️ 不要在这里发送通知，因为重启已触发，任务即将被取消
+                    # 更新风控日志状态为成功
+                    if refresh_risk_log_id:
+                        try:
+                            db_manager.update_risk_control_log(
+                                log_id=refresh_risk_log_id,
+                                processing_status='success',
+                                processing_result='密码登录刷新Cookie成功，实例已重启'
+                            )
+                        except Exception:
+                            pass
                     return True
                 else:
                     logger.error(f"【{self.cookie_id}】Cookie更新失败")
+                    if refresh_risk_log_id:
+                        try:
+                            db_manager.update_risk_control_log(
+                                log_id=refresh_risk_log_id,
+                                processing_status='failed',
+                                error_message='Cookie获取成功但更新到数据库失败'
+                            )
+                        except Exception:
+                            pass
                     return False
                     
             else:
@@ -5198,6 +5306,15 @@ class XianyuLive:
                 XianyuLive.set_password_login_failure_backoff(self.cookie_id, backoff_reason, backoff_seconds)
                 logger.warning(f"【{self.cookie_id}】密码登录失败，未获取到Cookie: {login_error}")
                 logger.warning(f"【{self.cookie_id}】已进入失败退避期: {backoff_reason}, {backoff_seconds}秒")
+                if refresh_risk_log_id:
+                    try:
+                        db_manager.update_risk_control_log(
+                            log_id=refresh_risk_log_id,
+                            processing_status='failed',
+                            error_message=login_error[:200]
+                        )
+                    except Exception:
+                        pass
                 return False
 
         except Exception as refresh_e:
@@ -5206,6 +5323,15 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】Cookie刷新或实例重启失败: {self._safe_str(refresh_e)}")
             import traceback
             logger.error(f"【{self.cookie_id}】详细堆栈:\n{traceback.format_exc()}")
+            if refresh_risk_log_id:
+                try:
+                    db_manager.update_risk_control_log(
+                        log_id=refresh_risk_log_id,
+                        processing_status='failed',
+                        error_message=str(refresh_e)[:200]
+                    )
+                except Exception:
+                    pass
             return False
 
     async def _verify_cookie_validity(self) -> dict:
@@ -9527,6 +9653,33 @@ Cookie数量: {cookie_count}
                     except Exception as log_clean_e:
                         logger.warning(f"【{self.cookie_id}】清理日志文件时出错: {log_clean_e}")
                     
+                    # 清理超时仍处于processing的风控日志（每10分钟一次）
+                    # 为避免所有实例同时执行，只让第一个实例执行
+                    try:
+                        if hasattr(self.__class__, '_last_risk_log_cleanup_time'):
+                            last_risk_cleanup = self.__class__._last_risk_log_cleanup_time
+                        else:
+                            self.__class__._last_risk_log_cleanup_time = 0
+                            last_risk_cleanup = 0
+
+                        current_time = time.time()
+                        if current_time - last_risk_cleanup > 600:
+                            try:
+                                cleaned_count = await asyncio.to_thread(
+                                    db_manager.mark_stale_risk_control_logs_failed,
+                                    timeout_minutes=15
+                                )
+                                if cleaned_count > 0:
+                                    logger.warning(f"【{self.cookie_id}】风控日志超时兜底清理完成，自动关闭 {cleaned_count} 条processing记录")
+                                self.__class__._last_risk_log_cleanup_time = current_time
+                            except asyncio.CancelledError:
+                                logger.warning(f"【{self.cookie_id}】风控日志超时兜底清理被取消")
+                                raise
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as risk_clean_e:
+                        logger.error(f"【{self.cookie_id}】清理超时风控日志时出错: {risk_clean_e}")
+
                     # 清理数据库历史数据（每天一次，保留90天数据）
                     # 为避免所有实例同时执行，只让第一个实例执行
                     try:
