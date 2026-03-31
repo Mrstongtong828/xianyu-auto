@@ -6,12 +6,14 @@ import time
 import json
 import random
 import string
+import re
 import aiohttp
 import io
 import base64
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from typing import List, Tuple, Dict, Optional, Any
+from urllib.parse import parse_qs, urlparse
 from cryptography.fernet import Fernet, InvalidToken
 from loguru import logger
 
@@ -774,10 +776,15 @@ class DBManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cookie_id TEXT NOT NULL,
                 event_type TEXT NOT NULL DEFAULT 'slider_captcha',
+                session_id TEXT,
+                trigger_scene TEXT,
+                result_code TEXT,
                 event_description TEXT,
+                event_meta TEXT,
                 processing_result TEXT,
                 processing_status TEXT DEFAULT 'processing',
                 error_message TEXT,
+                duration_ms INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
@@ -957,6 +964,26 @@ Cookie数量: {cookie_count}
                 logger.info("添加ai_config_presets表的api_type列...")
                 cursor.execute("ALTER TABLE ai_config_presets ADD COLUMN api_type TEXT NOT NULL DEFAULT ''")
                 logger.info("数据库迁移完成：添加ai_config_presets.api_type列")
+
+            # 检查risk_control_logs表扩展字段
+            cursor.execute("PRAGMA table_info(risk_control_logs)")
+            risk_log_columns = [column[1] for column in cursor.fetchall()]
+            risk_log_column_defs = {
+                'session_id': "TEXT",
+                'trigger_scene': "TEXT",
+                'result_code': "TEXT",
+                'event_meta': "TEXT",
+                'duration_ms': "INTEGER",
+            }
+            for column_name, column_type in risk_log_column_defs.items():
+                if column_name not in risk_log_columns:
+                    logger.info(f"添加risk_control_logs表的{column_name}列...")
+                    cursor.execute(f"ALTER TABLE risk_control_logs ADD COLUMN {column_name} {column_type}")
+                    logger.info(f"数据库迁移完成：添加risk_control_logs.{column_name}列")
+
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_cookie_created ON risk_control_logs(cookie_id, created_at DESC)")
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_type_status_created ON risk_control_logs(event_type, processing_status, created_at DESC)")
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_session_id ON risk_control_logs(session_id)")
 
         except Exception as e:
             logger.error(f"数据库迁移失败: {e}")
@@ -7693,9 +7720,369 @@ Cookie数量: {cookie_count}
 
     # ==================== 风控日志管理 ====================
 
+    def _serialize_risk_control_event_meta(self, event_meta: Any) -> Optional[str]:
+        if event_meta is None:
+            return None
+        if isinstance(event_meta, str):
+            text = event_meta.strip()
+            return text or None
+        try:
+            return json.dumps(event_meta, ensure_ascii=False, sort_keys=True)
+        except Exception as e:
+            logger.warning(f"序列化风控日志event_meta失败: {e}")
+            return None
+
+    def _decode_risk_control_event_meta(self, event_meta: Any) -> Optional[Any]:
+        if event_meta is None:
+            return None
+        if isinstance(event_meta, (dict, list)):
+            return event_meta
+        if not isinstance(event_meta, str):
+            return None
+        text = event_meta.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return text
+
+    def _extract_legacy_risk_duration_ms(self, *values: Any) -> Optional[int]:
+        duration_pattern = re.compile(r'耗时[:：]\s*([0-9]+(?:\.[0-9]+)?)\s*秒')
+        for value in values:
+            text = str(value or '').strip()
+            if not text:
+                continue
+            match = duration_pattern.search(text)
+            if not match:
+                continue
+            try:
+                return max(0, int(float(match.group(1)) * 1000))
+            except Exception:
+                continue
+        return None
+
+    def _extract_legacy_verification_url(self, *values: Any) -> Optional[str]:
+        url_pattern = re.compile(r'https?://\S+')
+        for value in values:
+            text = str(value or '').strip()
+            if not text:
+                continue
+            match = url_pattern.search(text)
+            if match:
+                return match.group(0).rstrip('),，。；;')
+        return None
+
+    def _build_legacy_verification_meta(self, verification_url: str = None) -> Optional[Dict[str, Any]]:
+        text = str(verification_url or '').strip()
+        if not text:
+            return None
+
+        try:
+            parsed = urlparse(text)
+            if not parsed.scheme and not parsed.netloc:
+                return {'verification_source': text[:120]}
+
+            meta: Dict[str, Any] = {
+                'verification_host': parsed.netloc or None,
+                'verification_path': parsed.path or None,
+            }
+            query = parse_qs(parsed.query or '')
+            x5secdata = query.get('x5secdata', [None])[0]
+            if x5secdata:
+                meta['verification_token_hash'] = hashlib.sha256(x5secdata.encode('utf-8')).hexdigest()[:16]
+            action = query.get('action', [None])[0]
+            if action:
+                meta['verification_action'] = action
+            step = query.get('x5step', [None])[0]
+            if step:
+                meta['verification_step'] = step
+            return {key: value for key, value in meta.items() if value is not None}
+        except Exception:
+            return {'verification_source': text[:120]}
+
+    def _infer_legacy_risk_trigger_scene(self, log_info: Dict[str, Any]) -> Optional[str]:
+        existing = str(log_info.get('trigger_scene') or '').strip()
+        if existing:
+            return existing
+
+        event_type = str(log_info.get('event_type') or '').strip()
+        description = str(log_info.get('event_description') or '').strip()
+        processing_result = str(log_info.get('processing_result') or '').strip()
+        error_message = str(log_info.get('error_message') or '').strip()
+        combined_text = ' '.join(part for part in (description, processing_result, error_message) if part)
+        lower_text = combined_text.lower()
+
+        if '手动触发账密cookie刷新' in description or '账密登录方式' in description:
+            return 'manual_password_refresh'
+        if '手动触发扫码cookie刷新' in description:
+            return 'manual_qr_refresh'
+        if '扫码登录获取真实cookie' in description:
+            return 'qr_login'
+
+        if event_type in {'face_verify', 'sms_verify', 'qr_verify', 'password_error'}:
+            return 'password_login'
+
+        if '连续失败5次' in description or '关键api不可用' in lower_text or 'cookie验证失败' in description:
+            return 'auto_cookie_refresh'
+
+        if 'token刷新' in combined_text or '令牌' in combined_text or 'session过期' in lower_text or 'token' in lower_text:
+            return 'token_refresh'
+
+        if event_type == 'cookie_refresh':
+            return 'auto_cookie_refresh'
+
+        return None
+
+    def _get_risk_trigger_scene_label(self, trigger_scene: Optional[str]) -> Optional[str]:
+        scene = str(trigger_scene or '').strip()
+        if not scene:
+            return None
+        scene_labels = {
+            'token_refresh': 'Token刷新',
+            'auto_cookie_refresh': '自动Cookie刷新',
+            'manual_password_refresh': '手动账密刷新',
+            'manual_qr_refresh': '手动扫码刷新',
+            'password_login': '密码登录',
+            'qr_login': '扫码登录',
+        }
+        return scene_labels.get(scene, scene)
+
+    def _compact_legacy_risk_description(self, log_info: Dict[str, Any]) -> str:
+        description = str(log_info.get('event_description') or '').strip()
+        if not description:
+            return ''
+
+        event_type = str(log_info.get('event_type') or '').strip()
+        trigger_scene = self._get_risk_trigger_scene_label(log_info.get('trigger_scene'))
+        lower_description = description.lower()
+
+        if event_type == 'slider_captcha' and ('滑块验证' in description or 'url:' in lower_description):
+            return f"检测到滑块验证（{trigger_scene}）" if trigger_scene else '检测到滑块验证'
+
+        if event_type == 'token_expired':
+            if 'session过期' in lower_description:
+                return '检测到Session过期'
+            if '令牌过期' in description:
+                return '检测到令牌过期'
+            return '检测到令牌/Session过期'
+
+        if event_type == 'cookie_refresh':
+            replacements = {
+                '手动触发Cookie刷新（账密登录方式）': '手动触发账密Cookie刷新',
+                '手动触发Cookie刷新（扫码登录方式）': '手动触发扫码Cookie刷新',
+                '令牌/Session过期触发Cookie刷新和实例重启': '令牌/Session过期触发Cookie刷新',
+                '连续失败5次触发Cookie刷新和实例重启': '连续失败5次触发Cookie刷新',
+                'Cookie验证失败(关键API不可用)触发Cookie刷新和实例重启': 'Cookie验证失败（关键API不可用）触发Cookie刷新',
+                '滑块成功后Token预热失败触发Cookie刷新和实例重启': '滑块成功后Token预热失败，触发Cookie刷新',
+            }
+            if description in replacements:
+                return replacements[description]
+
+        compacted = re.sub(r'[，,]?\s*URL[:：]\s*https?://\S+', '', description, flags=re.IGNORECASE)
+        compacted = re.sub(r'https?://\S+', '', compacted)
+        compacted = compacted.replace('准备刷新Cookie并重启实例', '准备刷新Cookie')
+        compacted = compacted.replace('触发Cookie刷新和实例重启', '触发Cookie刷新')
+        compacted = compacted.replace('  ', ' ')
+        compacted = compacted.strip(' ，,;；')
+        return compacted or description
+
+    def _compact_legacy_risk_processing_result(self, log_info: Dict[str, Any]) -> str:
+        processing_result = str(log_info.get('processing_result') or '').strip()
+        if not processing_result:
+            return ''
+
+        event_type = str(log_info.get('event_type') or '').strip()
+        error_message = str(log_info.get('error_message') or '').strip()
+        lower_result = processing_result.lower()
+
+        if event_type == 'slider_captcha':
+            if '滑块验证成功' in processing_result:
+                return '滑块验证成功，已获取新Cookie'
+
+            reason_match = re.search(r'原因[:：]\s*(.+)$', processing_result)
+            if reason_match:
+                reason = reason_match.group(1).strip(' ，,;；')
+                if '未获取到新cookies' in reason or '未获取到新cookie' in reason.lower():
+                    reason = '未获取到新Cookie'
+                elif '触发闲鱼风控验证' in reason:
+                    reason = '触发闲鱼风控验证'
+                return f'滑块验证失败（{reason}）'
+
+            if '触发闲鱼风控验证' in processing_result or '触发闲鱼风控验证' in error_message:
+                return '滑块验证失败（触发闲鱼风控验证）'
+
+        if event_type == 'cookie_refresh':
+            if '扫码登录真实Cookie获取成功，账号任务已启动' in processing_result:
+                if 'Token预热未完成' in processing_result:
+                    return '真实Cookie获取成功，Token预热待重试'
+                return '真实Cookie获取成功，账号任务已启动'
+
+            cookie_refresh_result_map = {
+                'Cookie刷新成功': 'Cookie刷新成功',
+                '扫码登录真实Cookie获取成功，但未切换到新任务': '真实Cookie获取成功，但未切换到新任务',
+                '密码登录刷新Cookie成功，实例已重启': '密码登录刷新Cookie成功，实例已重启',
+            }
+            if processing_result in cookie_refresh_result_map:
+                return cookie_refresh_result_map[processing_result]
+
+        compacted = re.sub(r'[，,]\s*耗时[:：]\s*[0-9]+(?:\.[0-9]+)?\s*秒', '', processing_result)
+        compacted = re.sub(r'[，,]\s*cookies?长度[:：]?\s*\d+', '', compacted, flags=re.IGNORECASE)
+        compacted = compacted.replace('未获取到新cookies', '未获取到新Cookie')
+        compacted = compacted.replace('未获取到新cookie', '未获取到新Cookie')
+        compacted = compacted.replace('  ', ' ')
+        compacted = compacted.strip(' ，,;；')
+        return compacted or processing_result
+
+    def _compact_legacy_risk_error_message(self, log_info: Dict[str, Any]) -> str:
+        error_message = str(log_info.get('error_message') or '').strip()
+        if not error_message:
+            return ''
+
+        compact_mappings = {
+            "cannot access local variable 'is_refresh_mode' where it is not associated with a value": '账密刷新流程变量异常',
+            '真实Cookie已获取，但首次Token初始化失败，未切换到新的账号任务': '真实Cookie已获取，但首次Token初始化失败',
+            '当前登录页被风控拦截，出现前置滑块，请稍后重试': '当前登录页被风控拦截',
+        }
+        if error_message in compact_mappings:
+            return compact_mappings[error_message]
+
+        if 'No space left on device' in error_message:
+            return '磁盘空间不足'
+
+        if '触发闲鱼风控验证' in error_message:
+            return '触发闲鱼风控验证'
+
+        if error_message.startswith('触发场景:') and 'URL:' in error_message:
+            if '密码登录' in error_message:
+                return '密码登录触发验证'
+            if '扫码登录' in error_message:
+                return '扫码登录触发验证'
+            return '触发身份验证'
+
+        if error_message.startswith('滑块验证失败：'):
+            reason = error_message.split('：', 1)[1].strip()
+            return f'滑块验证失败（{reason}）' if reason else '滑块验证失败'
+
+        compacted = re.sub(r'[，,]?\s*URL[:：]\s*https?://\S+', '', error_message, flags=re.IGNORECASE)
+        compacted = re.sub(r'https?://\S+', '', compacted)
+        compacted = compacted.replace('  ', ' ')
+        compacted = compacted.strip(' ，,;；')
+        return compacted or error_message
+
+    def _normalize_legacy_risk_log(self, log_info: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(log_info)
+        session_id = str(normalized.get('session_id') or '').strip()
+        trigger_scene = str(normalized.get('trigger_scene') or '').strip()
+        result_code = str(normalized.get('result_code') or '').strip()
+        raw_meta = normalized.get('event_meta')
+        duration_ms = normalized.get('duration_ms')
+
+        is_legacy = not any([session_id, trigger_scene, result_code, raw_meta, duration_ms])
+
+        inferred_trigger_scene = self._infer_legacy_risk_trigger_scene(normalized)
+        if inferred_trigger_scene and not trigger_scene:
+            normalized['trigger_scene'] = inferred_trigger_scene
+
+        if duration_ms in (None, ''):
+            inferred_duration_ms = self._extract_legacy_risk_duration_ms(
+                normalized.get('processing_result'),
+                normalized.get('error_message'),
+                normalized.get('event_description'),
+            )
+            if inferred_duration_ms is not None:
+                normalized['duration_ms'] = inferred_duration_ms
+
+        if not raw_meta:
+            verification_url = self._extract_legacy_verification_url(
+                normalized.get('event_description'),
+                normalized.get('error_message'),
+            )
+            legacy_meta = self._build_legacy_verification_meta(verification_url)
+            if legacy_meta:
+                legacy_meta['legacy_record'] = True
+                if normalized.get('trigger_scene'):
+                    legacy_meta['trigger_scene'] = normalized.get('trigger_scene')
+                normalized['event_meta'] = legacy_meta
+        elif isinstance(raw_meta, dict) and is_legacy:
+            legacy_meta = dict(raw_meta)
+            legacy_meta.setdefault('legacy_record', True)
+            if normalized.get('trigger_scene'):
+                legacy_meta.setdefault('trigger_scene', normalized.get('trigger_scene'))
+            normalized['event_meta'] = legacy_meta
+
+        normalized['event_description_display'] = self._compact_legacy_risk_description(normalized) or normalized.get('event_description') or '-'
+        if is_legacy:
+            normalized['processing_result_display'] = self._compact_legacy_risk_processing_result(normalized) or normalized.get('processing_result') or ''
+            normalized['error_message_display'] = self._compact_legacy_risk_error_message(normalized) or normalized.get('error_message') or ''
+        else:
+            normalized['processing_result_display'] = normalized.get('processing_result') or ''
+            normalized['error_message_display'] = normalized.get('error_message') or ''
+        normalized['is_legacy'] = is_legacy
+        normalized['session_display'] = session_id or ('历史记录' if is_legacy else '--')
+        return normalized
+
+    def _normalize_risk_log_datetime_param(self, value: Any, end_of_day: bool = False) -> Optional[str]:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        if len(text) == 10 and text.count('-') == 2:
+            suffix = '23:59:59' if end_of_day else '00:00:00'
+            return f"{text} {suffix}"
+        return text[:19]
+
+    def _build_risk_control_log_filters(
+        self,
+        alias: str = '',
+        cookie_id: str = None,
+        processing_status: str = None,
+        event_type: str = None,
+        trigger_scene: str = None,
+        session_id: str = None,
+        result_code: str = None,
+        date_from: str = None,
+        date_to: str = None,
+    ) -> Tuple[List[str], List[Any]]:
+        prefix = ''
+        if alias:
+            prefix = alias if alias.endswith('.') else f"{alias}."
+
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        filter_specs = [
+            ('cookie_id', cookie_id),
+            ('processing_status', processing_status),
+            ('event_type', event_type),
+            ('trigger_scene', trigger_scene),
+            ('session_id', session_id),
+            ('result_code', result_code),
+        ]
+        for column_name, raw_value in filter_specs:
+            value = str(raw_value or '').strip()
+            if not value:
+                continue
+            conditions.append(f"{prefix}{column_name} = ?")
+            params.append(value)
+
+        normalized_from = self._normalize_risk_log_datetime_param(date_from, end_of_day=False)
+        if normalized_from:
+            conditions.append(f"datetime({prefix}created_at) >= datetime(?)")
+            params.append(normalized_from)
+
+        normalized_to = self._normalize_risk_log_datetime_param(date_to, end_of_day=True)
+        if normalized_to:
+            conditions.append(f"datetime({prefix}created_at) <= datetime(?)")
+            params.append(normalized_to)
+
+        return conditions, params
+
     def add_risk_control_log(self, cookie_id: str, event_type: str = 'slider_captcha',
                            event_description: str = None, processing_result: str = None,
-                           processing_status: str = 'processing', error_message: str = None):
+                           processing_status: str = 'processing', error_message: str = None,
+                           session_id: str = None, trigger_scene: str = None,
+                           result_code: str = None, event_meta: Any = None,
+                           duration_ms: Optional[int] = None):
         """
         添加风控日志记录
 
@@ -7706,6 +8093,11 @@ Cookie数量: {cookie_count}
             processing_result: 处理结果
             processing_status: 处理状态 ('processing', 'success', 'failed')
             error_message: 错误信息
+            session_id: 事件链路ID
+            trigger_scene: 触发场景
+            result_code: 结果代码
+            event_meta: 结构化扩展信息
+            duration_ms: 处理耗时（毫秒）
 
         Returns:
             int or None: 添加成功返回日志ID，失败返回None
@@ -7715,25 +8107,47 @@ Cookie数量: {cookie_count}
                 cursor = self.conn.cursor()
                 cursor.execute('''
                     INSERT INTO risk_control_logs
-                    (cookie_id, event_type, event_description, processing_result, processing_status, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (cookie_id, event_type, event_description, processing_result, processing_status, error_message))
+                    (cookie_id, event_type, session_id, trigger_scene, result_code, event_description,
+                     event_meta, processing_result, processing_status, error_message, duration_ms)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    cookie_id,
+                    event_type,
+                    session_id,
+                    trigger_scene,
+                    result_code,
+                    event_description,
+                    self._serialize_risk_control_event_meta(event_meta),
+                    processing_result,
+                    processing_status,
+                    error_message,
+                    int(duration_ms) if duration_ms is not None else None,
+                ))
                 self.conn.commit()
                 return cursor.lastrowid
         except Exception as e:
             logger.error(f"添加风控日志失败: {e}")
             return None
 
-    def update_risk_control_log(self, log_id: int, processing_result: str = None,
-                              processing_status: str = None, error_message: str = None) -> bool:
+    def update_risk_control_log(self, log_id: int, event_description: str = None,
+                              processing_result: str = None, processing_status: str = None,
+                              error_message: str = None, session_id: str = None,
+                              trigger_scene: str = None, result_code: str = None,
+                              event_meta: Any = None, duration_ms: Optional[int] = None) -> bool:
         """
         更新风控日志记录
 
         Args:
             log_id: 日志ID
+            event_description: 事件描述
             processing_result: 处理结果
             processing_status: 处理状态
             error_message: 错误信息
+            session_id: 事件链路ID
+            trigger_scene: 触发场景
+            result_code: 结果代码
+            event_meta: 结构化扩展信息
+            duration_ms: 处理耗时（毫秒）
 
         Returns:
             bool: 更新成功返回True，失败返回False
@@ -7746,6 +8160,10 @@ Cookie数量: {cookie_count}
                 update_fields = []
                 params = []
 
+                if event_description is not None:
+                    update_fields.append("event_description = ?")
+                    params.append(event_description)
+
                 if processing_result is not None:
                     update_fields.append("processing_result = ?")
                     params.append(processing_result)
@@ -7757,6 +8175,26 @@ Cookie数量: {cookie_count}
                 if error_message is not None:
                     update_fields.append("error_message = ?")
                     params.append(error_message)
+
+                if session_id is not None:
+                    update_fields.append("session_id = ?")
+                    params.append(session_id)
+
+                if trigger_scene is not None:
+                    update_fields.append("trigger_scene = ?")
+                    params.append(trigger_scene)
+
+                if result_code is not None:
+                    update_fields.append("result_code = ?")
+                    params.append(result_code)
+
+                if event_meta is not None:
+                    update_fields.append("event_meta = ?")
+                    params.append(self._serialize_risk_control_event_meta(event_meta))
+
+                if duration_ms is not None:
+                    update_fields.append("duration_ms = ?")
+                    params.append(int(duration_ms))
 
                 if update_fields:
                     update_fields.append("updated_at = CURRENT_TIMESTAMP")
@@ -7773,6 +8211,9 @@ Cookie数量: {cookie_count}
             return False
 
     def get_risk_control_logs(self, cookie_id: str = None, processing_status: str = None,
+                              event_type: str = None, trigger_scene: str = None,
+                              session_id: str = None, result_code: str = None,
+                              date_from: str = None, date_to: str = None,
                               limit: int = 100, offset: int = 0) -> List[Dict]:
         """
         获取风控日志列表
@@ -7780,6 +8221,12 @@ Cookie数量: {cookie_count}
         Args:
             cookie_id: Cookie ID，为None时获取所有日志
             processing_status: 处理状态，为None时不过滤状态
+            event_type: 事件类型
+            trigger_scene: 触发场景
+            session_id: 事件链路ID
+            result_code: 结果代码
+            date_from: 开始时间
+            date_to: 结束时间
             limit: 限制返回数量
             offset: 偏移量
 
@@ -7795,21 +8242,22 @@ Cookie数量: {cookie_count}
                     FROM risk_control_logs r
                     LEFT JOIN cookies c ON r.cookie_id = c.id
                 '''
-                conditions = []
-                params = []
-
-                if cookie_id:
-                    conditions.append('r.cookie_id = ?')
-                    params.append(cookie_id)
-
-                if processing_status:
-                    conditions.append('r.processing_status = ?')
-                    params.append(processing_status)
+                conditions, params = self._build_risk_control_log_filters(
+                    alias='r',
+                    cookie_id=cookie_id,
+                    processing_status=processing_status,
+                    event_type=event_type,
+                    trigger_scene=trigger_scene,
+                    session_id=session_id,
+                    result_code=result_code,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
 
                 if conditions:
                     query += ' WHERE ' + ' AND '.join(conditions)
 
-                query += ' ORDER BY r.created_at DESC LIMIT ? OFFSET ?'
+                query += ' ORDER BY datetime(COALESCE(r.updated_at, r.created_at)) DESC, r.id DESC LIMIT ? OFFSET ?'
                 params.extend([limit, offset])
                 cursor.execute(query, params)
 
@@ -7818,20 +8266,30 @@ Cookie数量: {cookie_count}
 
                 for row in cursor.fetchall():
                     log_info = dict(zip(columns, row))
-                    logs.append(log_info)
+                    log_info['event_meta'] = self._decode_risk_control_event_meta(log_info.get('event_meta'))
+                    logs.append(self._normalize_legacy_risk_log(log_info))
 
                 return logs
         except Exception as e:
             logger.error(f"获取风控日志失败: {e}")
             return []
 
-    def get_risk_control_logs_count(self, cookie_id: str = None, processing_status: str = None) -> int:
+    def get_risk_control_logs_count(self, cookie_id: str = None, processing_status: str = None,
+                                    event_type: str = None, trigger_scene: str = None,
+                                    session_id: str = None, result_code: str = None,
+                                    date_from: str = None, date_to: str = None) -> int:
         """
         获取风控日志总数
 
         Args:
             cookie_id: Cookie ID，为None时获取所有日志数量
             processing_status: 处理状态，为None时不过滤状态
+            event_type: 事件类型
+            trigger_scene: 触发场景
+            session_id: 事件链路ID
+            result_code: 结果代码
+            date_from: 开始时间
+            date_to: 结束时间
 
         Returns:
             int: 日志总数
@@ -7841,16 +8299,16 @@ Cookie数量: {cookie_count}
                 cursor = self.conn.cursor()
 
                 query = 'SELECT COUNT(*) FROM risk_control_logs'
-                conditions = []
-                params = []
-
-                if cookie_id:
-                    conditions.append('cookie_id = ?')
-                    params.append(cookie_id)
-
-                if processing_status:
-                    conditions.append('processing_status = ?')
-                    params.append(processing_status)
+                conditions, params = self._build_risk_control_log_filters(
+                    cookie_id=cookie_id,
+                    processing_status=processing_status,
+                    event_type=event_type,
+                    trigger_scene=trigger_scene,
+                    session_id=session_id,
+                    result_code=result_code,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
 
                 if conditions:
                     query += ' WHERE ' + ' AND '.join(conditions)
@@ -7861,6 +8319,124 @@ Cookie数量: {cookie_count}
         except Exception as e:
             logger.error(f"获取风控日志数量失败: {e}")
             return 0
+
+    def get_slider_verification_session_stats(self, cookie_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """获取滑块验证会话级统计数据。"""
+        empty_stats = {
+            'has_data': False,
+            'total_sessions': 0,
+            'total_attempts': 0,
+            'success_count': 0,
+            'failure_count': 0,
+            'processing_count': 0,
+            'completed_sessions': 0,
+            'success_rate': 0.0,
+            'recent_success': None,
+            'recent_failure': None,
+            'accounts_with_sessions': 0,
+            'stats_mode': 'session',
+        }
+
+        def _normalize_cookie_ids(values: Optional[List[str]]) -> Optional[List[str]]:
+            if values is None:
+                return None
+            normalized = []
+            for value in values:
+                text = str(value or '').strip()
+                if text:
+                    normalized.append(text)
+            return normalized
+
+        def _format_datetime_text(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            text = value.strip()
+            if not text:
+                return None
+            return text[:16]
+
+        try:
+            normalized_cookie_ids = _normalize_cookie_ids(cookie_ids)
+            if cookie_ids is not None and not normalized_cookie_ids:
+                return dict(empty_stats)
+
+            with self.lock:
+                cursor = self.conn.cursor()
+
+                base_conditions = [
+                    "event_type = ?",
+                    "session_id IS NOT NULL",
+                    "trim(session_id) != ''",
+                ]
+                base_params: List[Any] = ['slider_captcha']
+
+                if normalized_cookie_ids is not None:
+                    placeholders = ', '.join(['?'] * len(normalized_cookie_ids))
+                    base_conditions.append(f"cookie_id IN ({placeholders})")
+                    base_params.extend(normalized_cookie_ids)
+
+                where_clause = ' WHERE ' + ' AND '.join(base_conditions)
+
+                cursor.execute(
+                    f'''
+                    SELECT
+                        COUNT(*) AS total_sessions,
+                        COALESCE(SUM(CASE WHEN processing_status = 'success' THEN 1 ELSE 0 END), 0) AS success_count,
+                        COALESCE(SUM(CASE WHEN processing_status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
+                        COALESCE(SUM(CASE WHEN processing_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing_count,
+                        COUNT(DISTINCT cookie_id) AS accounts_with_sessions
+                    FROM risk_control_logs
+                    {where_clause}
+                    ''',
+                    base_params,
+                )
+                row = cursor.fetchone() or (0, 0, 0, 0, 0)
+
+                total_sessions = int(row[0] or 0)
+                success_count = int(row[1] or 0)
+                failure_count = int(row[2] or 0)
+                processing_count = int(row[3] or 0)
+                accounts_with_sessions = int(row[4] or 0)
+                completed_sessions = success_count + failure_count
+                success_rate = round((success_count / completed_sessions) * 100, 1) if completed_sessions > 0 else 0.0
+
+                def _fetch_recent_datetime(status_value: str) -> Optional[str]:
+                    conditions = list(base_conditions)
+                    params = list(base_params)
+                    conditions.append("processing_status = ?")
+                    params.append(status_value)
+                    recent_where = ' WHERE ' + ' AND '.join(conditions)
+
+                    cursor.execute(
+                        f'''
+                        SELECT COALESCE(updated_at, created_at)
+                        FROM risk_control_logs
+                        {recent_where}
+                        ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
+                        LIMIT 1
+                        ''',
+                        params,
+                    )
+                    row = cursor.fetchone()
+                    return _format_datetime_text(row[0] if row else None)
+
+                return {
+                    'has_data': total_sessions > 0,
+                    'total_sessions': total_sessions,
+                    'total_attempts': total_sessions,
+                    'success_count': success_count,
+                    'failure_count': failure_count,
+                    'processing_count': processing_count,
+                    'completed_sessions': completed_sessions,
+                    'success_rate': success_rate,
+                    'recent_success': _fetch_recent_datetime('success'),
+                    'recent_failure': _fetch_recent_datetime('failed'),
+                    'accounts_with_sessions': accounts_with_sessions,
+                    'stats_mode': 'session',
+                }
+        except Exception as e:
+            logger.error(f"获取滑块验证会话统计失败: {e}")
+            return dict(empty_stats)
 
     def delete_risk_control_log(self, log_id: int) -> bool:
         """

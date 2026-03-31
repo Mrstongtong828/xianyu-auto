@@ -2090,53 +2090,127 @@
 
       <div class="content-body">
         <!-- 风控日志控制面板 -->
-        <div class="card mb-4">
-          <div class="card-header">
-            <h5 class="mb-0">
-              <i class="bi bi-funnel me-2"></i>
-              筛选条件
-            </h5>
-          </div>
-          <div class="card-body">
-            <div class="row align-items-center">
-              <div class="col-md-4">
-                <label class="form-label">账号筛选</label>
-                <select class="form-select" id="riskLogCookieFilter" onchange="loadRiskControlLogs()">
-                  <option value="">全部账号</option>
-                </select>
-              </div>
-              <div class="col-md-3">
-                <label class="form-label">显示数量</label>
-                <select class="form-select" id="riskLogLimit" onchange="loadRiskControlLogs()">
-                  <option value="50">50条</option>
-                  <option value="100" selected>100条</option>
-                  <option value="200">200条</option>
-                  <option value="500">500条</option>
-                </select>
-              </div>
-              <div class="col-md-3">
-                <label class="form-label">处理状态</label>
-                <div class="d-flex gap-2 flex-wrap">
-                  <button type="button" class="badge bg-secondary filter-badge active border-0" data-status="" onclick="filterRiskLogsByStatus('')">
-                    全部
-                  </button>
-                  <button type="button" class="badge bg-warning filter-badge border-0" data-status="processing" onclick="filterRiskLogsByStatus('processing')">
-                    处理中
-                  </button>
-                  <button type="button" class="badge bg-success filter-badge border-0" data-status="success" onclick="filterRiskLogsByStatus('success')">
-                    成功
-                  </button>
-                  <button type="button" class="badge bg-danger filter-badge border-0" data-status="failed" onclick="filterRiskLogsByStatus('failed')">
-                    失败
-                  </button>
+        <div class="risk-log-toolbar-wrap mb-4">
+          <div class="row g-3 align-items-stretch risk-log-toolbar">
+            <div class="col-12 col-xl-6">
+              <div class="risk-tool-card risk-slider-stats-panel h-100">
+                <div class="risk-tool-card-header">
+                  <div class="risk-tool-card-meta">
+                    <div class="risk-tool-card-icon primary">
+                      <i class="bi bi-activity"></i>
+                    </div>
+                    <div>
+                      <div class="risk-tool-card-kicker">滑块验证统计</div>
+                      <h6 class="mb-1">当前系统用户会话表现</h6>
+                      <p class="text-muted mb-0 small">仅统计新结构化滑块会话，不包含内部重试样本</p>
+                    </div>
+                  </div>
+                  <span class="risk-tool-chip risk-slider-scope" id="riskSliderScope">全部账号</span>
+                </div>
+
+                <div class="risk-slider-hero">
+                  <div>
+                    <div class="risk-slider-rate-label">成功率</div>
+                    <div class="risk-slider-rate" id="riskSliderSuccessRate">--</div>
+                  </div>
+                  <div class="risk-slider-total" id="riskSliderAttemptCount">累计结构化会话 0 次</div>
+                </div>
+
+                <div class="risk-slider-stats-grid">
+                  <div class="risk-slider-stat-chip success">
+                    <span>成功会话</span>
+                    <strong id="riskSliderSuccessCount">0</strong>
+                  </div>
+                  <div class="risk-slider-stat-chip danger">
+                    <span>失败会话</span>
+                    <strong id="riskSliderFailureCount">0</strong>
+                  </div>
+                </div>
+
+                <div class="risk-slider-stats-foot">
+                  <div class="risk-slider-foot-item">
+                      <span>最近成功会话</span>
+                    <strong id="riskSliderRecentSuccess">--</strong>
+                  </div>
+                  <div class="risk-slider-foot-item">
+                      <span>最近失败会话</span>
+                    <strong id="riskSliderRecentFailure">--</strong>
+                  </div>
                 </div>
               </div>
-              <div class="col-md-2">
-                <label class="form-label">&nbsp;</label>
-                <div class="d-grid">
-                  <button class="btn btn-primary" onclick="loadRiskControlLogs()">
-                    <i class="bi bi-arrow-clockwise"></i> 刷新
-                  </button>
+            </div>
+
+            <div class="col-12 col-xl-6">
+              <div class="risk-tool-card risk-log-filter-panel h-100">
+                <div class="risk-tool-card-header">
+                  <div class="risk-tool-card-meta">
+                    <div class="risk-tool-card-icon warning">
+                      <i class="bi bi-sliders2"></i>
+                    </div>
+                    <div>
+                      <div class="risk-tool-card-kicker">日志筛选</div>
+                      <h6 class="mb-1">按账号、事件和时间快速定位</h6>
+                      <p class="text-muted mb-0 small">日志保留链路字段与脱敏元数据，左侧统计会随账号筛选联动更新</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="risk-filter-panel-body">
+                  <div class="risk-filter-grid">
+                    <div class="risk-filter-field risk-filter-field-account">
+                      <label class="form-label">账号筛选</label>
+                      <select class="form-select" id="riskLogCookieFilter" onchange="loadRiskControlLogs()">
+                        <option value="">全部账号</option>
+                      </select>
+                    </div>
+
+                    <div class="risk-filter-field risk-filter-field-limit">
+                      <label class="form-label">显示数量</label>
+                      <select class="form-select" id="riskLogLimit" onchange="loadRiskControlLogs()">
+                        <option value="50">50条</option>
+                        <option value="100" selected>100条</option>
+                        <option value="200">200条</option>
+                        <option value="500">500条</option>
+                      </select>
+                    </div>
+
+                    <div class="risk-filter-field risk-filter-field-event">
+                      <label class="form-label">事件类型</label>
+                      <select class="form-select" id="riskLogEventTypeFilter" onchange="loadRiskControlLogs()">
+                        <option value="">全部事件</option>
+                        <option value="slider_captcha">滑块验证</option>
+                        <option value="token_expired">令牌过期</option>
+                        <option value="cookie_refresh">Cookie刷新</option>
+                        <option value="face_verify">人脸验证</option>
+                        <option value="sms_verify">短信验证</option>
+                        <option value="qr_verify">二维码验证</option>
+                        <option value="password_error">账号密码错误</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="risk-filter-status-bar">
+                    <div class="risk-filter-status-controls">
+                      <div class="d-flex gap-2 flex-wrap risk-log-filter-badges">
+                        <button type="button" class="filter-badge filter-badge-neutral active border-0" data-status="" onclick="filterRiskLogsByStatus('')">
+                          全部
+                        </button>
+                        <button type="button" class="filter-badge filter-badge-processing border-0" data-status="processing" onclick="filterRiskLogsByStatus('processing')">
+                          处理中
+                        </button>
+                        <button type="button" class="filter-badge filter-badge-success border-0" data-status="success" onclick="filterRiskLogsByStatus('success')">
+                          成功
+                        </button>
+                        <button type="button" class="filter-badge filter-badge-danger border-0" data-status="failed" onclick="filterRiskLogsByStatus('failed')">
+                          失败
+                        </button>
+                      </div>
+                      <button class="btn btn-primary risk-filter-refresh-btn risk-filter-status-refresh" onclick="loadRiskControlLogs()">
+                        <i class="bi bi-arrow-clockwise"></i>
+                        <span>刷新日志</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2165,17 +2239,32 @@
               <p class="mt-2">正在加载风控日志...</p>
             </div>
             <div id="riskLogContainer" style="display: none;">
-              <div class="table-responsive">
-                <table class="table table-hover mb-0">
+              <div class="table-responsive risk-log-table-wrap">
+                <table class="table table-hover mb-0 risk-log-table">
+                  <colgroup>
+                    <col class="risk-log-col-time">
+                    <col class="risk-log-col-account">
+                    <col class="risk-log-col-category">
+                    <col class="risk-log-col-scene">
+                    <col class="risk-log-col-status">
+                    <col class="risk-log-col-summary">
+                    <col class="risk-log-col-outcome">
+                    <col class="risk-log-col-duration">
+                    <col class="risk-log-col-session">
+                    <col class="risk-log-col-action">
+                  </colgroup>
                   <thead class="table-light">
                     <tr>
-                      <th width="120">时间</th>
-                      <th width="100">账号</th>
-                      <th width="100">事件类型</th>
-                      <th width="80">状态</th>
-                      <th>事件描述</th>
-                      <th>处理结果</th>
-                      <th width="80">操作</th>
+                      <th>时间</th>
+                      <th>账号</th>
+                      <th>事件分类</th>
+                      <th>触发场景</th>
+                      <th>状态</th>
+                      <th>摘要</th>
+                      <th>结果 / 错误</th>
+                      <th>耗时</th>
+                      <th>链路ID</th>
+                      <th>操作</th>
                     </tr>
                   </thead>
                   <tbody id="riskLogTableBody">

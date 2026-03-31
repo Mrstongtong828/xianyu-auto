@@ -1224,6 +1224,31 @@ function parseUtcDateTime(dateString) {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+const beijingMinuteFormatter = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    hourCycle: 'h23'
+});
+
+function formatBeijingDateTime(dateString) {
+    const date = parseUtcDateTime(dateString);
+    if (!date) return '--';
+
+    const parts = {};
+    beijingMinuteFormatter.formatToParts(date).forEach(part => {
+        if (part.type !== 'literal') {
+            parts[part.type] = part.value;
+        }
+    });
+
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
 function isTodayOrder(createdAt) {
     const orderDate = parseUtcDateTime(createdAt);
     if (!orderDate) return false;
@@ -14636,17 +14661,175 @@ async function downloadLogFile(fileName, buttonEl) {
 let currentRiskLogStatus = '';
 let currentRiskLogOffset = 0;
 const riskLogLimit = 100;
+let currentRiskSliderStatsRequestId = 0;
 
-async function fetchRiskControlLogsPage(token, { cookieId = '', processingStatus = '', limit = 100, offset = 0 } = {}) {
-    let url = `/admin/risk-control-logs?limit=${limit}&offset=${offset}`;
-    if (cookieId) {
-        url += `&cookie_id=${encodeURIComponent(cookieId)}`;
-    }
-    if (processingStatus) {
-        url += `&processing_status=${encodeURIComponent(processingStatus)}`;
+function setRiskControlSliderStatsLoading(scopeLabel = '全部账号') {
+    const scopeElement = document.getElementById('riskSliderScope');
+    const successRateElement = document.getElementById('riskSliderSuccessRate');
+    const attemptCountElement = document.getElementById('riskSliderAttemptCount');
+    const successCountElement = document.getElementById('riskSliderSuccessCount');
+    const failureCountElement = document.getElementById('riskSliderFailureCount');
+    const recentSuccessElement = document.getElementById('riskSliderRecentSuccess');
+    const recentFailureElement = document.getElementById('riskSliderRecentFailure');
+
+    if (scopeElement) scopeElement.textContent = scopeLabel;
+    if (successRateElement) successRateElement.textContent = '--';
+    if (attemptCountElement) attemptCountElement.textContent = '统计中...';
+    if (successCountElement) successCountElement.textContent = '--';
+    if (failureCountElement) failureCountElement.textContent = '--';
+    if (recentSuccessElement) recentSuccessElement.textContent = '--';
+    if (recentFailureElement) recentFailureElement.textContent = '--';
+}
+
+function renderRiskControlSliderStats(stats = {}) {
+    const scopeElement = document.getElementById('riskSliderScope');
+    const successRateElement = document.getElementById('riskSliderSuccessRate');
+    const attemptCountElement = document.getElementById('riskSliderAttemptCount');
+    const successCountElement = document.getElementById('riskSliderSuccessCount');
+    const failureCountElement = document.getElementById('riskSliderFailureCount');
+    const recentSuccessElement = document.getElementById('riskSliderRecentSuccess');
+    const recentFailureElement = document.getElementById('riskSliderRecentFailure');
+
+    const totalSessions = Number(stats.total_sessions ?? stats.total_attempts ?? 0);
+    const successCount = Number(stats.success_count || 0);
+    const failureCount = Number(stats.failure_count || 0);
+    const processingCount = Number(stats.processing_count || 0);
+    const completedSessions = Number(stats.completed_sessions || (successCount + failureCount));
+    const successRate = Number.isFinite(Number(stats.success_rate)) ? Number(stats.success_rate).toFixed(1) : '0.0';
+    const hasData = Boolean(stats.has_data || totalSessions > 0);
+    const recentSuccessText = formatBeijingDateTime(stats.recent_success);
+    const recentFailureText = formatBeijingDateTime(stats.recent_failure);
+    let attemptSummary = '暂无结构化滑块会话统计';
+
+    if (hasData) {
+        attemptSummary = `累计结构化会话 ${totalSessions} 次`;
+        if (processingCount > 0) {
+            attemptSummary += `，进行中 ${processingCount} 次`;
+        }
     }
 
-    const response = await fetch(url, {
+    if (scopeElement) scopeElement.textContent = stats.scope_label || '全部账号';
+    if (successRateElement) successRateElement.textContent = completedSessions > 0 ? `${successRate}%` : '--';
+    if (attemptCountElement) attemptCountElement.textContent = attemptSummary;
+    if (successCountElement) successCountElement.textContent = String(successCount);
+    if (failureCountElement) failureCountElement.textContent = String(failureCount);
+    if (recentSuccessElement) recentSuccessElement.textContent = recentSuccessText;
+    if (recentFailureElement) recentFailureElement.textContent = recentFailureText;
+}
+
+async function loadRiskControlSliderStats(cookieId = '') {
+    const token = localStorage.getItem('auth_token');
+    const scopeLabel = cookieId || '全部账号';
+    const requestId = ++currentRiskSliderStatsRequestId;
+
+    setRiskControlSliderStatsLoading(scopeLabel);
+
+    try {
+        let url = '/admin/slider-verification-stats';
+        if (cookieId) {
+            url += `?cookie_id=${encodeURIComponent(cookieId)}`;
+        }
+
+        const response = await fetch(url, {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        const data = await response.json();
+        if (requestId !== currentRiskSliderStatsRequestId) {
+            return;
+        }
+
+        if (response.ok && data.success) {
+            renderRiskControlSliderStats(data.data || {});
+            return;
+        }
+
+        renderRiskControlSliderStats({
+            scope_label: scopeLabel,
+            total_sessions: 0,
+            success_count: 0,
+            failure_count: 0,
+            processing_count: 0,
+            completed_sessions: 0,
+            success_rate: 0,
+            recent_success: '--',
+            recent_failure: '--',
+            has_data: false
+        });
+    } catch (error) {
+        console.error('加载滑块验证统计失败:', error);
+        if (requestId !== currentRiskSliderStatsRequestId) {
+            return;
+        }
+        renderRiskControlSliderStats({
+            scope_label: scopeLabel,
+            total_sessions: 0,
+            success_count: 0,
+            failure_count: 0,
+            processing_count: 0,
+            completed_sessions: 0,
+            success_rate: 0,
+            recent_success: '--',
+            recent_failure: '--',
+            has_data: false
+        });
+    }
+}
+
+function getRiskLogFilters() {
+    return {
+        cookieId: document.getElementById('riskLogCookieFilter')?.value || '',
+        eventType: document.getElementById('riskLogEventTypeFilter')?.value || '',
+        triggerScene: document.getElementById('riskLogTriggerSceneFilter')?.value || '',
+        dateFrom: document.getElementById('riskLogDateFrom')?.value || '',
+        dateTo: document.getElementById('riskLogDateTo')?.value || '',
+        sessionId: (document.getElementById('riskLogSessionFilter')?.value || '').trim(),
+        processingStatus: currentRiskLogStatus,
+        limit: parseInt(document.getElementById('riskLogLimit')?.value, 10) || 100,
+    };
+}
+
+function hasActiveRiskLogFilters(filters = {}) {
+    return Boolean(
+        filters.cookieId ||
+        filters.processingStatus ||
+        filters.eventType ||
+        filters.triggerScene ||
+        filters.dateFrom ||
+        filters.dateTo ||
+        filters.sessionId
+    );
+}
+
+async function fetchRiskControlLogsPage(token, {
+    cookieId = '',
+    processingStatus = '',
+    eventType = '',
+    triggerScene = '',
+    dateFrom = '',
+    dateTo = '',
+    sessionId = '',
+    resultCode = '',
+    limit = 100,
+    offset = 0,
+} = {}) {
+    const params = new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+    });
+
+    if (cookieId) params.set('cookie_id', cookieId);
+    if (processingStatus) params.set('processing_status', processingStatus);
+    if (eventType) params.set('event_type', eventType);
+    if (triggerScene) params.set('trigger_scene', triggerScene);
+    if (dateFrom) params.set('date_from', dateFrom);
+    if (dateTo) params.set('date_to', dateTo);
+    if (sessionId) params.set('session_id', sessionId);
+    if (resultCode) params.set('result_code', resultCode);
+
+    const response = await fetch(`/admin/risk-control-logs?${params.toString()}`, {
         headers: {
             'Authorization': `Bearer ${token}`
         }
@@ -14663,7 +14846,18 @@ function needsClientSideRiskLogFilter(logs, processingStatus) {
     return logs.some(log => String(log.processing_status || '') !== processingStatus);
 }
 
-async function fetchRiskControlLogsWithClientFilter(token, { cookieId = '', processingStatus = '', limit = 100, offset = 0 } = {}) {
+async function fetchRiskControlLogsWithClientFilter(token, {
+    cookieId = '',
+    processingStatus = '',
+    eventType = '',
+    triggerScene = '',
+    dateFrom = '',
+    dateTo = '',
+    sessionId = '',
+    resultCode = '',
+    limit = 100,
+    offset = 0,
+} = {}) {
     const batchSize = 500;
     let fetchOffset = 0;
     let total = 0;
@@ -14672,6 +14866,12 @@ async function fetchRiskControlLogsWithClientFilter(token, { cookieId = '', proc
     while (true) {
         const pageData = await fetchRiskControlLogsPage(token, {
             cookieId,
+            eventType,
+            triggerScene,
+            dateFrom,
+            dateTo,
+            sessionId,
+            resultCode,
             limit: batchSize,
             offset: fetchOffset
         });
@@ -14700,9 +14900,12 @@ async function fetchRiskControlLogsWithClientFilter(token, { cookieId = '', proc
 // 加载风控日志
 async function loadRiskControlLogs(offset = 0) {
     const token = localStorage.getItem('auth_token');
-    const cookieId = document.getElementById('riskLogCookieFilter').value;
-    const limit = parseInt(document.getElementById('riskLogLimit').value, 10) || 100;
+    const filters = getRiskLogFilters();
+    const cookieId = filters.cookieId;
+    const limit = filters.limit;
     currentRiskLogOffset = offset;
+
+    loadRiskControlSliderStats(cookieId);
 
     const loadingDiv = document.getElementById('loadingRiskLogs');
     const logContainer = document.getElementById('riskLogContainer');
@@ -14714,18 +14917,14 @@ async function loadRiskControlLogs(offset = 0) {
 
     try {
         let data = await fetchRiskControlLogsPage(token, {
-            cookieId,
-            processingStatus: currentRiskLogStatus,
-            limit,
-            offset
+            ...filters,
+            offset,
         });
 
-        if (needsClientSideRiskLogFilter(data.data, currentRiskLogStatus)) {
+        if (needsClientSideRiskLogFilter(data.data, filters.processingStatus)) {
             data = await fetchRiskControlLogsWithClientFilter(token, {
-                cookieId,
-                processingStatus: currentRiskLogStatus,
-                limit,
-                offset
+                ...filters,
+                offset,
             });
         }
 
@@ -14760,6 +14959,138 @@ async function loadRiskControlLogs(offset = 0) {
 }
 
 // 显示风控日志
+function getRiskEventCategoryMeta(eventType) {
+    const normalizedType = String(eventType || '').trim();
+
+    if (['slider_captcha', 'face_verify', 'sms_verify', 'qr_verify', 'token_expired'].includes(normalizedType)) {
+        return {
+            label: '风控触发',
+            className: 'risk-event-category-trigger'
+        };
+    }
+
+    if (normalizedType === 'cookie_refresh') {
+        return {
+            label: 'Cookie刷新',
+            className: 'risk-event-category-refresh'
+        };
+    }
+
+    if (normalizedType === 'password_error') {
+        return {
+            label: '登录异常',
+            className: 'risk-event-category-error'
+        };
+    }
+
+    return {
+        label: normalizedType || '-',
+        className: 'risk-event-category-neutral'
+    };
+}
+
+function getRiskTriggerSceneLabel(triggerScene) {
+    const normalizedScene = String(triggerScene || '').trim();
+    const sceneLabels = {
+        token_refresh: 'Token刷新',
+        auto_cookie_refresh: '自动Cookie刷新',
+        manual_password_refresh: '手动账密刷新',
+        manual_qr_refresh: '手动扫码刷新',
+        password_login: '密码登录',
+        qr_login: '扫码登录'
+    };
+
+    return sceneLabels[normalizedScene] || normalizedScene || '-';
+}
+
+function formatRiskDuration(durationMs) {
+    const value = Number(durationMs);
+    if (!Number.isFinite(value) || value <= 0) {
+        return '--';
+    }
+    if (value < 1000) {
+        return `${Math.round(value)} ms`;
+    }
+    if (value < 60000) {
+        return `${(value / 1000).toFixed(1)} s`;
+    }
+    return `${(value / 60000).toFixed(1)} min`;
+}
+
+function formatRiskSessionId(sessionId, sessionDisplay = '') {
+    const text = String(sessionId || '').trim();
+    if (text) {
+        return text;
+    }
+    const fallback = String(sessionDisplay || '').trim();
+    return fallback || '--';
+}
+
+function normalizeRiskEventMeta(eventMeta) {
+    if (!eventMeta) {
+        return null;
+    }
+    if (typeof eventMeta === 'string') {
+        try {
+            return JSON.parse(eventMeta);
+        } catch (error) {
+            return { raw: eventMeta };
+        }
+    }
+    if (typeof eventMeta === 'object') {
+        return eventMeta;
+    }
+    return { raw: String(eventMeta) };
+}
+
+function renderRiskLogMetaDetails(eventMeta) {
+    const normalizedMeta = normalizeRiskEventMeta(eventMeta);
+    if (!normalizedMeta) {
+        return '';
+    }
+    const prettyJson = JSON.stringify(normalizedMeta, null, 2);
+    return `
+        <details class="mt-2">
+            <summary class="small text-muted">查看元数据</summary>
+            <pre class="small mb-0 mt-2">${escapeHtml(prettyJson)}</pre>
+        </details>
+    `;
+}
+
+function renderRiskLogSummaryCell(log) {
+    const descriptionText = log.event_description_display || log.event_description || '-';
+    const description = escapeHtml(descriptionText);
+    const resultCode = log.result_code
+        ? `<div class="small text-muted mt-1">结果代码: ${escapeHtml(log.result_code)}</div>`
+        : '';
+    return `
+        <div class="risk-log-summary-cell" title="${description}">${description}</div>
+        ${resultCode}
+    `;
+}
+
+function renderRiskLogOutcomeCell(log) {
+    const processingResultText = log.processing_result_display || log.processing_result || '';
+    const errorMessageText = log.error_message_display || log.error_message || '';
+    const processingResult = processingResultText
+        ? `<div class="text-wrap">${escapeHtml(processingResultText)}</div>`
+        : '';
+    const errorMessage = errorMessageText
+        ? `<div class="small text-danger mt-1">${escapeHtml(errorMessageText)}</div>`
+        : '';
+    const fallbackText = !processingResult && !errorMessage
+        ? '<span class="text-muted">-</span>'
+        : '';
+    return `
+        <div class="risk-log-outcome-cell">
+            ${processingResult}
+            ${errorMessage}
+            ${fallbackText}
+            ${renderRiskLogMetaDetails(log.event_meta)}
+        </div>
+    `;
+}
+
 function displayRiskControlLogs(logs) {
     const tableBody = document.getElementById('riskLogTableBody');
     tableBody.innerHTML = '';
@@ -14786,25 +15117,35 @@ function displayRiskControlLogs(logs) {
                 statusBadge = '<span class="badge bg-secondary">未知</span>';
         }
 
-        // 事件类型映射
-        const eventTypeMap = {
-            'slider_captcha': '滑块验证',
-            'face_verify': '人脸验证',
-            'sms_verify': '短信验证',
-            'qr_verify': '二维码验证',
-            'password_error': '账密错误',
-            'token_expired': '令牌过期',
-            'cookie_refresh': 'Cookie刷新'
-        };
-        const eventTypeName = eventTypeMap[log.event_type] || log.event_type || '-';
+        const eventCategory = getRiskEventCategoryMeta(log.event_type);
+        const eventCategoryBadge = `
+            <span
+                class="badge risk-event-category-badge ${eventCategory.className}"
+                title="原始类型: ${escapeHtml(log.event_type || '-')}"
+            >
+                ${escapeHtml(eventCategory.label)}
+            </span>
+        `;
+        const triggerSceneLabel = getRiskTriggerSceneLabel(log.trigger_scene);
+        const triggerSceneBadge = `
+            <span class="badge bg-light text-dark border" title="触发场景: ${escapeHtml(log.trigger_scene || '-')}">
+                ${escapeHtml(triggerSceneLabel)}
+            </span>
+        `;
+        const sessionIdDisplay = formatRiskSessionId(log.session_id, log.session_display);
+        const sessionTitle = escapeHtml(log.session_id || log.session_display || '-');
+        const durationText = formatRiskDuration(log.duration_ms);
 
         row.innerHTML = `
             <td class="text-nowrap">${createdAt}</td>
             <td class="text-nowrap">${escapeHtml(log.cookie_id || '-')}</td>
-            <td class="text-nowrap">${escapeHtml(eventTypeName)}</td>
+            <td class="text-nowrap">${eventCategoryBadge}</td>
+            <td class="text-nowrap">${triggerSceneBadge}</td>
             <td>${statusBadge}</td>
-            <td class="text-truncate" style="max-width: 200px;" title="${escapeHtml(log.event_description || '-')}">${escapeHtml(log.event_description || '-')}</td>
-            <td class="text-truncate" style="max-width: 200px;" title="${escapeHtml(log.processing_result || '-')}">${escapeHtml(log.processing_result || '-')}</td>
+            <td class="risk-log-cell-summary">${renderRiskLogSummaryCell(log)}</td>
+            <td class="risk-log-cell-outcome">${renderRiskLogOutcomeCell(log)}</td>
+            <td class="text-nowrap">${escapeHtml(durationText)}</td>
+            <td class="risk-log-cell-session" title="${sessionTitle}">${escapeHtml(sessionIdDisplay)}</td>
             <td>
                 <button class="btn btn-sm btn-outline-danger" onclick="deleteRiskControlLog(${log.id})" title="删除">
                     <i class="bi bi-trash"></i>
@@ -14820,8 +15161,7 @@ function displayRiskControlLogs(logs) {
 function updateRiskLogInfo(data) {
     const countElement = document.getElementById('riskLogCount');
     const paginationInfo = document.getElementById('riskLogPaginationInfo');
-    const cookieId = document.getElementById('riskLogCookieFilter')?.value;
-    const hasFilters = Boolean(cookieId || currentRiskLogStatus);
+    const hasFilters = hasActiveRiskLogFilters(getRiskLogFilters());
     const total = data.total || 0;
     const currentCount = data.data ? data.data.length : 0;
 

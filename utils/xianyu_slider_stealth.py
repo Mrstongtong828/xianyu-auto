@@ -8,12 +8,14 @@
 import time
 import random
 import json
+import hashlib
 import os
 import math
 import threading
 import tempfile
 import shutil
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright, ElementHandle
 from playwright.async_api import async_playwright
 import asyncio
@@ -806,6 +808,8 @@ class XianyuSliderStealth:
         self.last_verification_feedback = {}
         self.last_login_error = ""
         self._slider_refresh_mode = False
+        self.risk_session_id = None
+        self.risk_trigger_scene = None
         self.trajectory_params = {
             "total_steps_range": [5, 8],  # 极速：5-8步（超快滑动）
             "base_delay_range": [0.0002, 0.0005],  # 极速：0.2-0.5ms延迟
@@ -827,6 +831,37 @@ class XianyuSliderStealth:
     def _fail_login(self, message: str):
         self.last_login_error = message
         return None
+
+    def _build_risk_event_meta(self, verification_url: str = None, extra: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        payload: Dict[str, Any] = {}
+        trigger_scene = getattr(self, 'risk_trigger_scene', None)
+        if trigger_scene:
+            payload['trigger_scene'] = trigger_scene
+
+        text = str(verification_url or '').strip()
+        if text:
+            try:
+                parsed = urlparse(text)
+                if parsed.scheme or parsed.netloc:
+                    if parsed.netloc:
+                        payload['verification_host'] = parsed.netloc
+                    if parsed.path:
+                        payload['verification_path'] = parsed.path
+                    query = parse_qs(parsed.query or '')
+                    x5secdata = query.get('x5secdata', [None])[0]
+                    if x5secdata:
+                        payload['verification_token_hash'] = hashlib.sha256(x5secdata.encode('utf-8')).hexdigest()[:16]
+                    action = query.get('action', [None])[0]
+                    if action:
+                        payload['verification_action'] = action
+                else:
+                    payload['verification_source'] = text[:120]
+            except Exception:
+                payload['verification_source'] = text[:120]
+
+        if isinstance(extra, dict):
+            payload.update({key: value for key, value in extra.items() if value is not None})
+        return payload or None
 
     def _get_slider_failure_message(self, default_message: str) -> str:
         feedback = self.last_verification_feedback or {}
@@ -5157,9 +5192,19 @@ class XianyuSliderStealth:
                                     db_manager.add_risk_control_log(
                                         cookie_id=self.pure_user_id,
                                         event_type=db_event_type,
+                                        session_id=getattr(self, 'risk_session_id', None),
+                                        trigger_scene=getattr(self, 'risk_trigger_scene', None) or 'password_login',
+                                        result_code=f"{verification_type}_detected",
                                         event_description=f"检测到{event_name}",
+                                        event_meta=self._build_risk_event_meta(
+                                            verification_url=frame_url,
+                                            extra={
+                                                'verification_type': verification_type,
+                                                'account_id': self.pure_user_id,
+                                            }
+                                        ),
                                         processing_status='processing' if verification_type != 'password_error' else 'failed',
-                                        error_message=f"触发场景: 密码登录, URL: {frame_url}"
+                                        error_message='检测到需要人工完成的身份验证' if verification_type != 'password_error' else '账号密码错误'
                                     )
                                     logger.info(f"【{self.pure_user_id}】已记录风控日志: {db_event_type}")
                                 except Exception as log_err:
