@@ -2723,6 +2723,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
 
         def run_login():
             from db_manager import db_manager  # 在函数开头导入，避免作用域问题
+            from XianyuAutoAsync import XianyuLive
             try:
                 cookies_dict = slider_instance.login_with_password_playwright(
                     account=account,
@@ -2740,14 +2741,60 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                     _update_session_risk_log(session_id, 'failed', error_message=failure_message[:200])
                     return
                 
-                # 将cookie字典转换为字符串格式
-                cookies_str = '; '.join([f"{k}={v}" for k, v in cookies_dict.items()])
-                
                 log_with_user('info', f"账号密码登录成功，获取到 {len(cookies_dict)} 个Cookie字段: {account_id}", current_user)
                 
                 # 检查是否已存在相同账号ID的Cookie
                 existing_cookies = db_manager.get_all_cookies(user_id)
                 is_new_account = account_id not in existing_cookies
+                existing_cookie_value = existing_cookies.get(account_id, '') if not is_new_account else ''
+                existing_cookie_dict = trans_cookies(existing_cookie_value) if existing_cookie_value else {}
+
+                merge_result = XianyuLive.protected_merge_cookie_dicts(existing_cookie_dict, cookies_dict)
+                if merge_result['incoming_missing_protected_fields']:
+                    log_with_user(
+                        'warning',
+                        f"密码登录返回的Cookie快照缺少关键字段，将进行保护性合并: {', '.join(merge_result['incoming_missing_protected_fields'])}",
+                        current_user
+                    )
+                if merge_result['preserved_protected_fields']:
+                    log_with_user(
+                        'warning',
+                        f"密码登录保护性保留旧关键字段: {', '.join(merge_result['preserved_protected_fields'])}",
+                        current_user
+                    )
+                if merge_result['account_switched']:
+                    log_with_user('warning', f"检测到unb变化，按账号切换处理: {account_id}", current_user)
+
+                merged_cookies_dict = merge_result['merged_cookies_dict']
+                log_with_user(
+                    'info',
+                    f"manual_login_protected_merge incoming_count={merge_result.get('incoming_count', len(cookies_dict))} "
+                    f"existing_count={merge_result.get('existing_count', len(existing_cookie_dict))} "
+                    f"merged_count={merge_result.get('merged_count', len(merged_cookies_dict))} "
+                    f"protected_preserved_fields={merge_result.get('preserved_protected_fields') or []} "
+                    f"would_remove_fields={merge_result.get('would_remove_fields') or []} "
+                    f"account_switched={merge_result.get('account_switched', False)}",
+                    current_user
+                )
+                cookies_str = '; '.join([f"{k}={v}" for k, v in merged_cookies_dict.items()])
+
+                if merge_result['missing_required_fields']:
+                    missing_fields_text = ', '.join(merge_result['missing_required_fields'])
+                    error_message = f"登录成功但Cookie核心字段仍缺失，未覆盖旧Cookie: {missing_fields_text}"
+                    log_with_user('error', f"{error_message}: {account_id}", current_user)
+                    _set_password_login_session_status(session_id, 'failed', error=error_message)
+                    _update_session_risk_log(
+                        session_id,
+                        'failed',
+                        error_message=error_message[:200],
+                        result_code='password_login_cookie_incomplete',
+                        event_meta={
+                            'missing_required_fields': merge_result['missing_required_fields'],
+                            'incoming_missing_protected_fields': merge_result['incoming_missing_protected_fields'],
+                            'preserved_protected_fields': merge_result['preserved_protected_fields'],
+                        }
+                    )
+                    return
                 
                 # 保存账号密码和Cookie到数据库
                 # 使用 update_cookie_account_info 来保存，它会自动处理新账号和现有账号的情况
@@ -2819,7 +2866,6 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                     # 登录成功后，调用_refresh_cookies_via_browser刷新Cookie
                     try:
                         log_with_user('info', f"开始调用_refresh_cookies_via_browser刷新Cookie: {account_id}", current_user)
-                        from XianyuAutoAsync import XianyuLive
                         
                         # 创建临时的XianyuLive实例来刷新Cookie
                         temp_xianyu = XianyuLive(
@@ -2886,7 +2932,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                     'success',
                     account_id=account_id,
                     is_new_account=is_new_account,
-                    cookie_count=len(cookies_dict)
+                    cookie_count=len(merged_cookies_dict)
                 )
                 # 更新风控日志状态
                 _update_session_risk_log(session_id, 'success', processing_result='Cookie刷新成功')
@@ -2901,7 +2947,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         template_type,
                         account_id=account_id,
                         time=time.strftime('%Y-%m-%d %H:%M:%S'),
-                        cookie_count=str(len(cookies_dict))
+                        cookie_count=str(len(merged_cookies_dict))
                     )
 
                     login_type = "刷新Cookie" if notify_refresh_mode else "密码登录"

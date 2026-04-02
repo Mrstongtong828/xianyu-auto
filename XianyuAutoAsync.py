@@ -39,6 +39,26 @@ from utils.notification_dispatcher import (
 
 DELIVERY_BATCH_MAX_UNITS = 10
 DELIVERY_BATCH_MAX_CHARS = 1200
+PROTECTED_SESSION_COOKIE_FIELDS = (
+    'unb',
+    'sgcookie',
+    'cookie2',
+    '_m_h5_tk',
+    '_m_h5_tk_enc',
+    't',
+    'cna',
+    'havana_lgc2_77',
+    '_tb_token_',
+)
+REQUIRED_SESSION_COOKIE_FIELDS = (
+    'unb',
+    'sgcookie',
+    'cookie2',
+    '_m_h5_tk',
+    '_m_h5_tk_enc',
+    't',
+    'cna',
+)
 
 # 滑块验证补丁已废弃，使用集成的 Playwright 登录方法
 # 不再需要猴子补丁，所有功能已集成到 XianyuSliderStealth 类中
@@ -4487,28 +4507,123 @@ class XianyuLive:
         self.last_slider_success_at = time.time()
         self.last_slider_success_cookie_length = len(cookies_str or "")
 
-    def _merge_cookie_dicts(self, incoming_cookies_dict):
-        """合并新获取的 Cookie，返回合并结果和变更摘要。"""
-        current_cookies_dict = trans_cookies(self.cookies_str)
-        merged_cookies_dict = current_cookies_dict.copy()
+    @classmethod
+    def protected_merge_cookie_dicts(cls, existing_cookies_dict, incoming_cookies_dict):
+        """保护性合并 Cookie，避免不完整快照覆盖关键会话字段。"""
+        existing = dict(existing_cookies_dict or {})
+        incoming = dict(incoming_cookies_dict or {})
+        existing_count = len(existing)
+        incoming_count = len(incoming)
+        existing_unb = str(existing.get('unb') or '').strip()
+        incoming_unb = str(incoming.get('unb') or '').strip()
+        account_switched = bool(existing_unb and incoming_unb and existing_unb != incoming_unb)
+
+        if account_switched:
+            merged = incoming.copy()
+        else:
+            merged = existing.copy()
+            for key, value in incoming.items():
+                merged[key] = value
+
         updated_fields = []
         changed_fields = []
         new_fields = []
-
-        for key, value in (incoming_cookies_dict or {}).items():
-            if key in merged_cookies_dict:
-                if merged_cookies_dict[key] != value:
-                    merged_cookies_dict[key] = value
-                    updated_fields.append(key)
-                    changed_fields.append(key)
-            else:
-                merged_cookies_dict[key] = value
+        for key, value in incoming.items():
+            old_value = existing.get(key)
+            if old_value is None:
                 updated_fields.append(f"{key}(新增)")
                 new_fields.append(key)
+            elif old_value != value:
+                updated_fields.append(key)
+                changed_fields.append(key)
 
-        return current_cookies_dict, merged_cookies_dict, updated_fields, changed_fields, new_fields
+        would_remove_fields = [key for key in existing.keys() if key not in incoming]
+        if account_switched:
+            removed_fields = list(would_remove_fields)
+            preserved_fields = []
+            preserved_protected_fields = []
+        else:
+            removed_fields = []
+            preserved_fields = list(would_remove_fields)
+            preserved_protected_fields = [
+                key for key in would_remove_fields
+                if key in PROTECTED_SESSION_COOKIE_FIELDS and existing.get(key)
+            ]
 
-    def _log_cookie_merge_summary(self, merged_cookies_dict, updated_fields, changed_fields, new_fields, context: str):
+        missing_protected_fields = [
+            key for key in PROTECTED_SESSION_COOKIE_FIELDS
+            if not merged.get(key)
+        ]
+        missing_required_fields = [
+            key for key in REQUIRED_SESSION_COOKIE_FIELDS
+            if not merged.get(key)
+        ]
+        incoming_missing_protected_fields = [
+            key for key in PROTECTED_SESSION_COOKIE_FIELDS
+            if not incoming.get(key)
+        ]
+        incoming_missing_required_fields = [
+            key for key in REQUIRED_SESSION_COOKIE_FIELDS
+            if not incoming.get(key)
+        ]
+
+        return {
+            'existing_cookies_dict': existing,
+            'incoming_cookies_dict': incoming,
+            'merged_cookies_dict': merged,
+            'existing_count': existing_count,
+            'incoming_count': incoming_count,
+            'merged_count': len(merged),
+            'updated_fields': updated_fields,
+            'changed_fields': changed_fields,
+            'new_fields': new_fields,
+            'would_remove_fields': would_remove_fields,
+            'removed_fields': removed_fields,
+            'preserved_fields': preserved_fields,
+            'preserved_protected_fields': preserved_protected_fields,
+            'missing_protected_fields': missing_protected_fields,
+            'missing_required_fields': missing_required_fields,
+            'incoming_missing_protected_fields': incoming_missing_protected_fields,
+            'incoming_missing_required_fields': incoming_missing_required_fields,
+            'account_switched': account_switched,
+        }
+
+    def _merge_cookie_dicts(self, incoming_cookies_dict, existing_cookies_dict=None):
+        """兼容旧调用，返回保护性合并结果。"""
+        merge_result = self.protected_merge_cookie_dicts(
+            existing_cookies_dict if existing_cookies_dict is not None else trans_cookies(self.cookies_str),
+            incoming_cookies_dict,
+        )
+        return (
+            merge_result['existing_cookies_dict'],
+            merge_result['merged_cookies_dict'],
+            merge_result['updated_fields'],
+            merge_result['changed_fields'],
+            merge_result['new_fields'],
+        )
+
+    def _log_protected_merge_event(self, event_name: str, merge_result: Dict[str, Any]):
+        """输出受保护 Cookie 合并审计日志，便于定位快照覆盖问题。"""
+        if not merge_result:
+            return
+
+        protected_preserved_fields = merge_result.get('preserved_protected_fields') or []
+        would_remove_fields = merge_result.get('would_remove_fields') or []
+        logger.info(
+            f"【{self.cookie_id}】{event_name} "
+            f"incoming_count={merge_result.get('incoming_count', 0)} "
+            f"existing_count={merge_result.get('existing_count', 0)} "
+            f"merged_count={merge_result.get('merged_count', 0)} "
+            f"protected_preserved_fields={protected_preserved_fields} "
+            f"would_remove_fields={would_remove_fields} "
+            f"account_switched={merge_result.get('account_switched', False)}"
+        )
+
+    def _log_cookie_merge_summary(self, merged_cookies_dict, updated_fields, changed_fields, new_fields, context: str,
+                                  preserved_fields=None, preserved_protected_fields=None,
+                                  would_remove_fields=None, removed_fields=None,
+                                  missing_protected_fields=None, missing_required_fields=None,
+                                  incoming_missing_protected_fields=None, account_switched: bool = False):
         """打印 Cookie 合并结果，重点关注会话关键字段。"""
         context_prefix = f"{context}：" if context else ""
         logger.info(f"【{self.cookie_id}】{context_prefix}合并后cookies包含 {len(merged_cookies_dict)} 个字段")
@@ -4518,7 +4633,39 @@ class XianyuLive:
         else:
             logger.info(f"【{self.cookie_id}】{context_prefix}没有cookie字段需要更新")
 
-        important_keys = ['unb', '_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 't', 'sgcookie', 'cna', 'x5sec', 'x5secdata']
+        if account_switched:
+            logger.warning(f"【{self.cookie_id}】{context_prefix}检测到unb变化，按账号切换处理，不保留旧账号Cookie字段")
+
+        if preserved_protected_fields:
+            logger.warning(
+                f"【{self.cookie_id}】{context_prefix}保护性保留关键字段 ({len(preserved_protected_fields)}个): {', '.join(preserved_protected_fields)}"
+            )
+        if preserved_fields:
+            logger.info(
+                f"【{self.cookie_id}】{context_prefix}保留旧Cookie字段 ({len(preserved_fields)}个): {', '.join(preserved_fields)}"
+            )
+        if would_remove_fields:
+            logger.info(
+                f"【{self.cookie_id}】{context_prefix}浏览器快照未返回的旧字段 ({len(would_remove_fields)}个): {', '.join(would_remove_fields)}"
+            )
+        if removed_fields:
+            logger.warning(
+                f"【{self.cookie_id}】{context_prefix}实际移除旧字段 ({len(removed_fields)}个): {', '.join(removed_fields)}"
+            )
+        if incoming_missing_protected_fields:
+            logger.warning(
+                f"【{self.cookie_id}】{context_prefix}新快照缺失的关键字段 ({len(incoming_missing_protected_fields)}个): {', '.join(incoming_missing_protected_fields)}"
+            )
+        if missing_protected_fields:
+            logger.warning(
+                f"【{self.cookie_id}】{context_prefix}合并后仍缺失的受保护字段 ({len(missing_protected_fields)}个): {', '.join(missing_protected_fields)}"
+            )
+        if missing_required_fields:
+            logger.error(
+                f"【{self.cookie_id}】{context_prefix}合并后仍缺失的核心字段 ({len(missing_required_fields)}个): {', '.join(missing_required_fields)}"
+            )
+
+        important_keys = list(PROTECTED_SESSION_COOKIE_FIELDS) + ['x5sec', 'x5secdata']
         logger.info(f"【{self.cookie_id}】{context_prefix}关键字段检查:")
         for key in important_keys:
             if key in merged_cookies_dict:
@@ -5132,11 +5279,6 @@ class XianyuLive:
                     logger.info(f"【{self.cookie_id}】滑块验证成功，获取到新的cookies")
 
                     current_cookies_dict = trans_cookies(self.cookies_str)
-                    updated_cookies = {}
-                    updated_fields = []
-                    changed_fields = []
-                    new_fields = []
-                    removed_fields = []
                     x5sec_cookies = {}
 
                     # 筛选出x5相关的cookies（包括x5sec, x5step等）
@@ -5147,30 +5289,43 @@ class XianyuLive:
 
                     logger.info(f"【{self.cookie_id}】找到{len(x5sec_cookies)}个x5相关cookies: {list(x5sec_cookies.keys())}")
 
-                    updated_cookies = dict(cookies)
-                    for cookie_name, cookie_value in updated_cookies.items():
-                        old_value = current_cookies_dict.get(cookie_name)
-                        if old_value is None:
-                            updated_fields.append(f"{cookie_name}(新增)")
-                            new_fields.append(cookie_name)
-                        elif old_value != cookie_value:
-                            updated_fields.append(cookie_name)
-                            changed_fields.append(cookie_name)
-
-                    removed_fields = [cookie_name for cookie_name in current_cookies_dict.keys() if cookie_name not in updated_cookies]
+                    merge_result = self.protected_merge_cookie_dicts(current_cookies_dict, cookies)
+                    updated_cookies = merge_result['merged_cookies_dict']
+                    updated_fields = merge_result['updated_fields']
+                    changed_fields = merge_result['changed_fields']
+                    new_fields = merge_result['new_fields']
+                    removed_fields = merge_result['removed_fields']
+                    preserved_fields = merge_result['preserved_fields']
+                    preserved_protected_fields = merge_result['preserved_protected_fields']
+                    would_remove_fields = merge_result['would_remove_fields']
+                    missing_protected_fields = merge_result['missing_protected_fields']
+                    missing_required_fields = merge_result['missing_required_fields']
+                    incoming_missing_protected_fields = merge_result['incoming_missing_protected_fields']
+                    account_switched = merge_result['account_switched']
                     cookies_str = "; ".join([f"{k}={v}" for k, v in updated_cookies.items()])
+                    qr_login_grace = self.get_qr_login_grace(self.cookie_id)
+                    merge_event_name = "slider_post_qr_protected_merge" if qr_login_grace else "captcha_protected_merge"
+                    self._log_protected_merge_event(merge_event_name, merge_result)
 
                     self._log_cookie_merge_summary(
                         updated_cookies,
                         updated_fields,
                         changed_fields,
                         new_fields,
-                        context="滑块验证成功后Cookie合并"
+                        context="滑块验证成功后Cookie合并",
+                        preserved_fields=preserved_fields,
+                        preserved_protected_fields=preserved_protected_fields,
+                        would_remove_fields=would_remove_fields,
+                        removed_fields=removed_fields,
+                        missing_protected_fields=missing_protected_fields,
+                        missing_required_fields=missing_required_fields,
+                        incoming_missing_protected_fields=incoming_missing_protected_fields,
+                        account_switched=account_switched,
                     )
-                    if removed_fields:
-                        logger.warning(
-                            f"【{self.cookie_id}】滑块验证成功后按浏览器快照移除旧Cookie字段 ({len(removed_fields)}个): {', '.join(removed_fields)}"
-                        )
+
+                    if missing_required_fields:
+                        logger.error(f"【{self.cookie_id}】滑块验证后的Cookie仍缺失核心字段，放弃写回数据库: {', '.join(missing_required_fields)}")
+                        return None
 
                     # 自动更新数据库中的cookie
                     try:
@@ -5192,7 +5347,7 @@ class XianyuLive:
                         # 记录成功更新到日志文件，包含关键字段变化和x5相关cookie信息
                         x5sec_cookies_str = "; ".join([f"{k}={v}" for k, v in x5sec_cookies.items()]) if x5sec_cookies else "无"
                         log_captcha_event(self.cookie_id, "滑块验证成功并自动更新数据库", True,
-                            f"原有{len(current_cookies_dict)}个cookie项, 浏览器快照{len(updated_cookies)}个, 变更字段{len(changed_fields)}个, 新增字段{len(new_fields)}个, 移除字段{len(removed_fields)}个, x5 cookies: {x5sec_cookies_str}")
+                            f"原有{len(current_cookies_dict)}个cookie项, 浏览器快照{len(cookies)}个, 合并后{len(updated_cookies)}个, 变更字段{len(changed_fields)}个, 新增字段{len(new_fields)}个, 保护保留{len(preserved_protected_fields)}个, 实际移除{len(removed_fields)}个, x5 cookies: {x5sec_cookies_str}")
 
                         # 发送成功通知
                         await self.send_token_refresh_notification(
@@ -5210,7 +5365,7 @@ class XianyuLive:
                         # 记录更新失败到日志文件，包含获取到的x5 cookies
                         x5sec_cookies_str = "; ".join([f"{k}={v}" for k, v in x5sec_cookies.items()]) if x5sec_cookies else "无"
                         log_captcha_event(self.cookie_id, "滑块验证成功但数据库更新失败", False,
-                            f"更新异常: {self._safe_str(update_e)[:100]}, 变更字段{len(changed_fields)}个, 新增字段{len(new_fields)}个, 获取到的x5 cookies: {x5sec_cookies_str}")
+                            f"更新异常: {self._safe_str(update_e)[:100]}, 变更字段{len(changed_fields)}个, 新增字段{len(new_fields)}个, 保护保留{len(preserved_protected_fields)}个, 获取到的x5 cookies: {x5sec_cookies_str}")
 
                         # 发送更新失败通知
                         await self.send_token_refresh_notification(
@@ -5315,15 +5470,34 @@ class XianyuLive:
 
             # 合并cookies：保留原有cookies，只更新新获取到的字段
             try:
-                _, merged_cookies_dict, updated_fields, changed_fields, new_fields = self._merge_cookie_dicts(new_cookies_dict)
+                merge_result = self.protected_merge_cookie_dicts(trans_cookies(self.cookies_str), new_cookies_dict)
+                merged_cookies_dict = merge_result['merged_cookies_dict']
+                updated_fields = merge_result['updated_fields']
+                changed_fields = merge_result['changed_fields']
+                new_fields = merge_result['new_fields']
+                self._log_protected_merge_event("password_refresh_protected_merge", merge_result)
 
                 self._log_cookie_merge_summary(
                     merged_cookies_dict,
                     updated_fields,
                     changed_fields,
                     new_fields,
-                    context="密码登录刷新Cookie"
+                    context="密码登录刷新Cookie",
+                    preserved_fields=merge_result['preserved_fields'],
+                    preserved_protected_fields=merge_result['preserved_protected_fields'],
+                    would_remove_fields=merge_result['would_remove_fields'],
+                    removed_fields=merge_result['removed_fields'],
+                    missing_protected_fields=merge_result['missing_protected_fields'],
+                    missing_required_fields=merge_result['missing_required_fields'],
+                    incoming_missing_protected_fields=merge_result['incoming_missing_protected_fields'],
+                    account_switched=merge_result['account_switched'],
                 )
+
+                if merge_result['missing_required_fields']:
+                    logger.error(
+                        f"【{self.cookie_id}】密码登录刷新后的Cookie仍缺失核心字段，放弃写回并重启: {', '.join(merge_result['missing_required_fields'])}"
+                    )
+                    return False
 
                 # 使用合并后的cookies字符串
                 new_cookies_str = '; '.join([f"{k}={v}" for k, v in merged_cookies_dict.items()])
@@ -10488,37 +10662,40 @@ class XianyuLive:
             from db_manager import db_manager
             existing_cookie = db_manager.get_cookie_details(target_cookie_id)
             existing_cookie_value = self._extract_cookie_value(existing_cookie)
+            existing_cookies_dict = {}
             if existing_cookie_value:
                 try:
-                    existing_cookies_dict = trans_cookies(existing_cookie_value)
-                    if existing_cookies_dict:
-                        merged_cookies_dict = existing_cookies_dict.copy()
-                        updated_fields = []
-
-                        for name, value in real_cookies_dict.items():
-                            old_value = merged_cookies_dict.get(name)
-                            if old_value is None:
-                                updated_fields.append(f"{name}(新增)")
-                            elif old_value != value:
-                                updated_fields.append(name)
-                            merged_cookies_dict[name] = value
-
-                        preserved_fields = [name for name in existing_cookies_dict.keys() if name not in real_cookies_dict]
-                        preserved_x5_fields = [
-                            name for name in preserved_fields
-                            if name.lower().startswith('x5') or 'x5sec' in name.lower()
-                        ]
-
-                        if updated_fields:
-                            logger.info(f"【{target_cookie_id}】扫码登录合并更新Cookie字段: {', '.join(updated_fields)}")
-                        if preserved_fields:
-                            logger.info(f"【{target_cookie_id}】扫码登录保留现有Cookie字段 ({len(preserved_fields)}个): {', '.join(preserved_fields)}")
-                        if preserved_x5_fields:
-                            logger.warning(f"【{target_cookie_id}】扫码登录保留风控Cookie字段: {', '.join(preserved_x5_fields)}")
-
-                        real_cookies_dict = merged_cookies_dict
+                    existing_cookies_dict = trans_cookies(existing_cookie_value) or {}
                 except Exception as merge_e:
-                    logger.warning(f"【{target_cookie_id}】合并现有账号Cookie失败，继续使用扫码获取到的Cookie: {self._safe_str(merge_e)}")
+                    logger.warning(f"【{target_cookie_id}】解析现有账号Cookie失败，按空基线继续: {self._safe_str(merge_e)}")
+
+            merge_result = self.protected_merge_cookie_dicts(existing_cookies_dict, real_cookies_dict)
+            real_cookies_dict = merge_result['merged_cookies_dict']
+            if target_cookie_id == self.cookie_id:
+                self._log_protected_merge_event("qr_login_protected_merge", merge_result)
+            else:
+                logger.info(
+                    f"【{target_cookie_id}】qr_login_protected_merge "
+                    f"incoming_count={merge_result.get('incoming_count', 0)} "
+                    f"existing_count={merge_result.get('existing_count', 0)} "
+                    f"merged_count={merge_result.get('merged_count', 0)} "
+                    f"protected_preserved_fields={merge_result.get('preserved_protected_fields') or []} "
+                    f"would_remove_fields={merge_result.get('would_remove_fields') or []} "
+                    f"account_switched={merge_result.get('account_switched', False)}"
+                )
+            if merge_result['updated_fields']:
+                logger.info(f"【{target_cookie_id}】扫码登录合并更新Cookie字段: {', '.join(merge_result['updated_fields'])}")
+            if merge_result['preserved_fields']:
+                logger.info(f"【{target_cookie_id}】扫码登录保留现有Cookie字段 ({len(merge_result['preserved_fields'])}个): {', '.join(merge_result['preserved_fields'])}")
+            if merge_result['preserved_protected_fields']:
+                logger.warning(f"【{target_cookie_id}】扫码登录保护性保留关键字段: {', '.join(merge_result['preserved_protected_fields'])}")
+            if merge_result['account_switched']:
+                logger.warning(f"【{target_cookie_id}】扫码登录检测到unb变化，按账号切换处理，不保留旧账号Cookie字段")
+
+            missing_required_fields = merge_result['missing_required_fields']
+            if missing_required_fields:
+                logger.error(f"【{target_cookie_id}】扫码登录真实Cookie仍缺失核心字段，放弃保存: {', '.join(missing_required_fields)}")
+                return False
 
             # 生成真实cookie字符串
             real_cookies_str = '; '.join([f"{k}={v}" for k, v in real_cookies_dict.items()])
@@ -10845,20 +11022,35 @@ class XianyuLive:
             for cookie in updated_cookies:
                 real_cookies_dict[cookie['name']] = cookie['value']
 
+            merge_result = self.protected_merge_cookie_dicts(current_cookies_dict, real_cookies_dict)
+            real_cookies_dict = merge_result['merged_cookies_dict']
+            self._log_protected_merge_event("browser_stabilization_protected_merge", merge_result)
+
             # 生成真实cookie字符串
             real_cookies_str = '; '.join([f"{k}={v}" for k, v in real_cookies_dict.items()])
 
             logger.info(f"【{self.cookie_id}】真实Cookie已获取，包含 {len(real_cookies_dict)} 个字段")
             logger.info(f"【{self.cookie_id}】真实Cookie摘要: {self._summarize_cookie_string(real_cookies_str)}")
-            # 检查关键字段
-            important_keys = ['unb', '_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 't', 'sgcookie', 'cna']
-            logger.info(f"【{self.cookie_id}】关键字段检查:")
-            for key in important_keys:
-                if key in real_cookies_dict:
-                    val = real_cookies_dict[key]
-                    logger.info(f"【{self.cookie_id}】  ✅ {key}: {'存在' if val else '为空'} (长度: {len(str(val)) if val else 0})")
-                else:
-                    logger.info(f"【{self.cookie_id}】  ❌ {key}: 缺失")
+
+            self._log_cookie_merge_summary(
+                real_cookies_dict,
+                merge_result['updated_fields'],
+                merge_result['changed_fields'],
+                merge_result['new_fields'],
+                context="浏览器稳定化Cookie",
+                preserved_fields=merge_result['preserved_fields'],
+                preserved_protected_fields=merge_result['preserved_protected_fields'],
+                would_remove_fields=merge_result['would_remove_fields'],
+                removed_fields=merge_result['removed_fields'],
+                missing_protected_fields=merge_result['missing_protected_fields'],
+                missing_required_fields=merge_result['missing_required_fields'],
+                incoming_missing_protected_fields=merge_result['incoming_missing_protected_fields'],
+                account_switched=merge_result['account_switched'],
+            )
+
+            if merge_result['missing_required_fields']:
+                logger.error(f"【{self.cookie_id}】浏览器稳定化后的Cookie仍缺失核心字段，放弃写回数据库: {', '.join(merge_result['missing_required_fields'])}")
+                return False
 
             # 检查Cookie是否有有效更新
             changed_cookies = []
@@ -11140,8 +11332,34 @@ class XianyuLive:
                 elif old_value != new_value:
                     changed_cookies.append(name)
 
+            merge_result = self.protected_merge_cookie_dicts(self.cookies, new_cookies_dict)
+            merged_cookies_dict = merge_result['merged_cookies_dict']
+            self._log_protected_merge_event("browser_refresh_protected_merge", merge_result)
+
+            self._log_cookie_merge_summary(
+                merged_cookies_dict,
+                merge_result['updated_fields'],
+                merge_result['changed_fields'],
+                merge_result['new_fields'],
+                context="浏览器刷新Cookie",
+                preserved_fields=merge_result['preserved_fields'],
+                preserved_protected_fields=merge_result['preserved_protected_fields'],
+                would_remove_fields=merge_result['would_remove_fields'],
+                removed_fields=merge_result['removed_fields'],
+                missing_protected_fields=merge_result['missing_protected_fields'],
+                missing_required_fields=merge_result['missing_required_fields'],
+                incoming_missing_protected_fields=merge_result['incoming_missing_protected_fields'],
+                account_switched=merge_result['account_switched'],
+            )
+
+            if merge_result['missing_required_fields']:
+                logger.error(
+                    f"【{self.cookie_id}】浏览器刷新后的Cookie仍缺失核心字段，放弃覆盖当前Cookie: {', '.join(merge_result['missing_required_fields'])}"
+                )
+                return False
+
             # 更新self.cookies和cookies_str
-            self.cookies.update(new_cookies_dict)
+            self.cookies = merged_cookies_dict
             self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
 
             logger.info(f"【{self.cookie_id}】Cookie已更新，包含 {len(new_cookies_dict)} 个字段")

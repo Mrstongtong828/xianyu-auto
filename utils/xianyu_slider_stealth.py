@@ -1879,6 +1879,26 @@ class XianyuSliderStealth:
         '_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 'unb', 'sgcookie',
         'uc1', 'uc3', 'uc4', 'csg', 'sn',
     }
+    _PROTECTED_SESSION_COOKIE_FIELDS = (
+        'unb',
+        'sgcookie',
+        'cookie2',
+        '_m_h5_tk',
+        '_m_h5_tk_enc',
+        't',
+        'cna',
+        'havana_lgc2_77',
+        '_tb_token_',
+    )
+    _REQUIRED_SESSION_COOKIE_FIELDS = (
+        'unb',
+        'sgcookie',
+        'cookie2',
+        '_m_h5_tk',
+        '_m_h5_tk_enc',
+        't',
+        'cna',
+    )
     _X5_COOKIE_PREFIX = 'x5'
 
     def _snapshot_context_cookies(self, context=None) -> Dict[str, str]:
@@ -1892,6 +1912,34 @@ class XianyuSliderStealth:
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】快照 Cookie 失败: {e}")
             return {}
+
+    def _log_cookie_snapshot_integrity(self, cookies_dict: Dict[str, str], scene: str):
+        """记录登录链路中的 Cookie 快照完整性，避免不完整快照静默通过。"""
+        if not cookies_dict:
+            logger.warning(f"【{self.pure_user_id}】{scene}Cookie快照为空")
+            return
+
+        missing_protected_fields = [
+            key for key in self._PROTECTED_SESSION_COOKIE_FIELDS
+            if not cookies_dict.get(key)
+        ]
+        missing_required_fields = [
+            key for key in self._REQUIRED_SESSION_COOKIE_FIELDS
+            if not cookies_dict.get(key)
+        ]
+
+        if missing_protected_fields:
+            logger.warning(
+                f"【{self.pure_user_id}】{scene}Cookie快照完整性告警: "
+                f"field_count={len(cookies_dict)}, "
+                f"missing_protected_fields={missing_protected_fields}"
+            )
+        if missing_required_fields:
+            logger.warning(
+                f"【{self.pure_user_id}】{scene}Cookie快照核心字段不足: "
+                f"field_count={len(cookies_dict)}, "
+                f"missing_required_fields={missing_required_fields}"
+            )
 
     def _safe_page_url(self, page) -> str:
         try:
@@ -2393,6 +2441,7 @@ class XianyuSliderStealth:
         cookies_dict = self._snapshot_context_cookies(context)
         if cookies_dict:
             logger.success(f"【{self.pure_user_id}】✅ 验证后获取Cookie成功，{len(cookies_dict)}个字段")
+            self._log_cookie_snapshot_integrity(cookies_dict, "验证完成后")
             return cookies_dict
 
         logger.error(f"【{self.pure_user_id}】❌ 验证成功后未获取到Cookie")
@@ -6179,6 +6228,7 @@ class XianyuSliderStealth:
                                 logger.info(f"【{self.pure_user_id}】成功获取Cookie，包含 {len(cookies_dict)} 个字段")
 
                                 if cookies_dict:
+                                    self._log_cookie_snapshot_integrity(cookies_dict, "滑块验证后")
                                     logger.success("✅ Cookie有效")
                                     return cookies_dict
 
@@ -6215,6 +6265,7 @@ class XianyuSliderStealth:
                                 logger.info(f"【{self.pure_user_id}】成功获取Cookie，包含 {len(cookies_dict)} 个字段")
 
                                 if cookies_dict:
+                                    self._log_cookie_snapshot_integrity(cookies_dict, "无滑块已登录场景")
                                     logger.success("✅ Cookie有效")
                                     return cookies_dict
 
@@ -6256,6 +6307,7 @@ class XianyuSliderStealth:
                         # 获取Cookie
                         cookies_dict = self._snapshot_context_cookies(context)
                         if cookies_dict:
+                            self._log_cookie_snapshot_integrity(cookies_dict, "无 iframe 已登录场景")
                             logger.success("✅ 登录成功！Cookie有效")
                             return cookies_dict
 
@@ -6516,8 +6568,9 @@ class XianyuSliderStealth:
                                 logger.info(f"【{self.pure_user_id}】  ❌ {key}: 缺失")
                         
                         logger.info("=" * 60)
-                        
+
                         if cookies_dict:
+                            self._log_cookie_snapshot_integrity(cookies_dict, "密码登录完成后")
                             logger.success("✅ 登录成功！Cookie有效")
                             return cookies_dict
                         else:
