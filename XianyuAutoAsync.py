@@ -133,6 +133,10 @@ class ConnectionState(Enum):
     CLOSED = "closed"  # 已关闭
 
 
+class InitAuthError(Exception):
+    """WebSocket 已建立，但初始化鉴权失败。"""
+
+
 class AutoReplyPauseManager:
     """自动回复暂停管理器"""
     def __init__(self):
@@ -261,8 +265,25 @@ class XianyuLive:
     _password_login_failure_backoff = {}  # {cookie_id: {'until': float, 'reason': str, 'seconds': int}}
 
     # 手动刷新状态：用于避免手动刷新与自动滑块/自动Cookie刷新互相踩踏
-    _manual_refresh_state = {}  # {cookie_id: {'source': str, 'started_at': float, 'previous_cookie_refresh_enabled': Optional[bool]}}
+    _manual_refresh_state = {}  # {cookie_id: {'source': str, 'phase': str, 'started_at': float, 'previous_cookie_refresh_enabled': Optional[bool]}}
     _manual_refresh_lock = threading.Lock()
+    _manual_refresh_handoff_ttl = 120  # 刷新交接恢复窗口（秒）
+
+    # 认证恢复锁：同一账号同一时刻只允许一条密码登录恢复链路执行
+    _auth_recovery_locks = {}  # {cookie_id: {'owner': str, 'acquired_at': float, 'expires_at': float}}
+    _auth_recovery_lock = threading.Lock()
+    _auth_recovery_lock_ttl = 240
+
+    # 通用预热 token：用于手动刷新/恢复预检成功后的新实例首轮复用
+    _auth_prewarmed_tokens = {}  # {cookie_id: {'token': str, 'timestamp': float, 'source': str}}
+    _auth_prewarmed_token_ttl = 180
+
+    # 初始化鉴权失败熔断：区分于 WebSocket 建链失败，避免重连风暴
+    _init_auth_failure_state = {}  # {cookie_id: {'count': int, 'window_started_at': float, 'last_failure_at': float, 'last_reason': str, 'circuit_until': float}}
+    _init_auth_failure_lock = threading.Lock()
+    _init_auth_failure_window = 60
+    _init_auth_failure_threshold = 3
+    _init_auth_cooldown = 60
 
     # 扫码登录token预热缓存，避免扫码成功后正式任务立即再次刷新token
     _qr_prewarmed_tokens = {}  # {cookie_id: {'token': str, 'timestamp': float}}
@@ -271,6 +292,49 @@ class XianyuLive:
     # 扫码登录后的短期缓冲状态：首轮 token 刷新命中风控时，先做浏览器侧稳定化再决定是否上滑块
     _qr_login_grace_state = {}  # {cookie_id: {'timestamp': float, 'captcha_buffer_used': bool, 'browser_stabilized': bool}}
     _qr_login_grace_ttl = 180  # 秒
+
+    @classmethod
+    def _cleanup_auth_prewarmed_tokens(cls):
+        """清理过期的通用预热 token 缓存。"""
+        now = time.time()
+        expired_cookie_ids = [
+            cookie_id
+            for cookie_id, token_info in cls._auth_prewarmed_tokens.items()
+            if now - token_info.get('timestamp', 0) > cls._auth_prewarmed_token_ttl
+        ]
+        for cookie_id in expired_cookie_ids:
+            cls._auth_prewarmed_tokens.pop(cookie_id, None)
+
+    @classmethod
+    def cache_auth_prewarmed_token(cls, cookie_id: str, token: str, source: str = 'generic_auth'):
+        """缓存预检成功后的 token，供新实例首轮初始化复用。"""
+        if not cookie_id or not token:
+            return
+        cls._cleanup_auth_prewarmed_tokens()
+        cls._auth_prewarmed_tokens[cookie_id] = {
+            'token': token,
+            'timestamp': time.time(),
+            'source': source,
+        }
+
+    @classmethod
+    def pop_auth_prewarmed_token(cls, cookie_id: str) -> Optional[Dict[str, Any]]:
+        """弹出通用预热 token，过期则忽略。"""
+        if not cookie_id:
+            return None
+        cls._cleanup_auth_prewarmed_tokens()
+        token_info = cls._auth_prewarmed_tokens.pop(cookie_id, None)
+        if not token_info:
+            return None
+        if time.time() - token_info.get('timestamp', 0) > cls._auth_prewarmed_token_ttl:
+            return None
+        return token_info
+
+    @classmethod
+    def clear_auth_prewarmed_token(cls, cookie_id: str):
+        if not cookie_id:
+            return
+        cls._auth_prewarmed_tokens.pop(cookie_id, None)
 
     @classmethod
     def _cleanup_qr_prewarmed_tokens(cls):
@@ -314,6 +378,174 @@ class XianyuLive:
         if not cookie_id:
             return
         cls._qr_prewarmed_tokens.pop(cookie_id, None)
+
+    @classmethod
+    def _cleanup_manual_refresh_state(cls):
+        """清理过期的刷新交接恢复状态。"""
+        now = time.time()
+        expired_cookie_ids = []
+        with cls._manual_refresh_lock:
+            for cookie_id, state in cls._manual_refresh_state.items():
+                if state.get('phase') != 'handoff_recovery':
+                    continue
+                expires_at = state.get('expires_at', 0)
+                if expires_at and now > expires_at:
+                    expired_cookie_ids.append(cookie_id)
+
+            for cookie_id in expired_cookie_ids:
+                cls._manual_refresh_state.pop(cookie_id, None)
+
+        for cookie_id in expired_cookie_ids:
+            logger.warning(f"【{cookie_id}】刷新交接恢复状态已过期，自动清理")
+
+    @classmethod
+    def get_manual_refresh_state(cls, cookie_id: str) -> Optional[Dict[str, Any]]:
+        if not cookie_id:
+            return None
+        cls._cleanup_manual_refresh_state()
+        with cls._manual_refresh_lock:
+            state = cls._manual_refresh_state.get(cookie_id)
+            return dict(state) if state else None
+
+    @classmethod
+    def mark_manual_refresh_handoff(cls, cookie_id: str, source: str = 'manual_refresh_handoff', ttl: int = None) -> Dict[str, Any]:
+        """将手动刷新状态切换为交接恢复窗口，允许新实例做初始化恢复。"""
+        if not cookie_id:
+            return {'updated': False, 'reason': 'empty_cookie_id'}
+
+        live_instance = cls.get_instance(cookie_id)
+        previous_cookie_refresh_enabled = None
+        if live_instance is not None:
+            previous_cookie_refresh_enabled = live_instance.cookie_refresh_enabled
+
+        now = time.time()
+        expires_at = now + (ttl or cls._manual_refresh_handoff_ttl)
+        with cls._manual_refresh_lock:
+            state = cls._manual_refresh_state.get(cookie_id) or {}
+            state.update({
+                'source': source,
+                'phase': 'handoff_recovery',
+                'started_at': state.get('started_at', now),
+                'updated_at': now,
+                'handoff_started_at': now,
+                'expires_at': expires_at,
+                'slider_failed_bypass_used': state.get('slider_failed_bypass_used', False),
+                'previous_cookie_refresh_enabled': state.get('previous_cookie_refresh_enabled', previous_cookie_refresh_enabled),
+            })
+            cls._manual_refresh_state[cookie_id] = state
+
+        logger.warning(
+            f"【{cookie_id}】已进入刷新交接恢复窗口，允许新实例执行初始化恢复 (有效期 {int(expires_at - now)} 秒)"
+        )
+        return {'updated': True, 'phase': 'handoff_recovery', 'expires_at': expires_at}
+
+    @classmethod
+    def consume_manual_refresh_slider_failed_bypass(cls, cookie_id: str) -> bool:
+        if not cookie_id:
+            return False
+        cls._cleanup_manual_refresh_state()
+        with cls._manual_refresh_lock:
+            state = cls._manual_refresh_state.get(cookie_id)
+            if not state or state.get('phase') != 'handoff_recovery':
+                return False
+            if state.get('slider_failed_bypass_used'):
+                return False
+            state['slider_failed_bypass_used'] = True
+            state['updated_at'] = time.time()
+            return True
+
+    @classmethod
+    def _cleanup_auth_recovery_locks(cls):
+        now = time.time()
+        expired_cookie_ids = []
+        with cls._auth_recovery_lock:
+            for cookie_id, state in cls._auth_recovery_locks.items():
+                if now > state.get('expires_at', 0):
+                    expired_cookie_ids.append(cookie_id)
+            for cookie_id in expired_cookie_ids:
+                cls._auth_recovery_locks.pop(cookie_id, None)
+
+    @classmethod
+    def acquire_auth_recovery_lock(cls, cookie_id: str, owner: str, ttl: int = None) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        if not cookie_id or not owner:
+            return False, None
+        cls._cleanup_auth_recovery_locks()
+        now = time.time()
+        expires_at = now + (ttl or cls._auth_recovery_lock_ttl)
+        with cls._auth_recovery_lock:
+            existing = cls._auth_recovery_locks.get(cookie_id)
+            if existing and existing.get('owner') != owner and now <= existing.get('expires_at', 0):
+                return False, dict(existing)
+            cls._auth_recovery_locks[cookie_id] = {
+                'owner': owner,
+                'acquired_at': now,
+                'expires_at': expires_at,
+            }
+        return True, None
+
+    @classmethod
+    def release_auth_recovery_lock(cls, cookie_id: str, owner: str = None):
+        if not cookie_id:
+            return
+        with cls._auth_recovery_lock:
+            existing = cls._auth_recovery_locks.get(cookie_id)
+            if not existing:
+                return
+            if owner and existing.get('owner') != owner:
+                return
+            cls._auth_recovery_locks.pop(cookie_id, None)
+
+    @classmethod
+    def get_init_auth_failure_state(cls, cookie_id: str) -> Optional[Dict[str, Any]]:
+        if not cookie_id:
+            return None
+        with cls._init_auth_failure_lock:
+            state = cls._init_auth_failure_state.get(cookie_id)
+            if not state:
+                return None
+            if state.get('circuit_until') and time.time() > state.get('circuit_until', 0):
+                state = {
+                    'count': 0,
+                    'window_started_at': 0,
+                    'last_failure_at': state.get('last_failure_at', 0),
+                    'last_reason': state.get('last_reason'),
+                    'circuit_until': 0,
+                }
+                cls._init_auth_failure_state[cookie_id] = state
+            return dict(state)
+
+    @classmethod
+    def record_init_auth_failure(cls, cookie_id: str, reason: str) -> Dict[str, Any]:
+        now = time.time()
+        with cls._init_auth_failure_lock:
+            state = cls._init_auth_failure_state.get(cookie_id) or {
+                'count': 0,
+                'window_started_at': now,
+                'last_failure_at': 0,
+                'last_reason': '',
+                'circuit_until': 0,
+            }
+            window_started_at = state.get('window_started_at', 0)
+            if not window_started_at or (now - window_started_at) > cls._init_auth_failure_window:
+                state['count'] = 0
+                state['window_started_at'] = now
+                state['circuit_until'] = 0
+
+            state['count'] = int(state.get('count', 0)) + 1
+            state['last_failure_at'] = now
+            state['last_reason'] = str(reason or '')
+            if state['count'] >= cls._init_auth_failure_threshold:
+                state['circuit_until'] = now + cls._init_auth_cooldown
+
+            cls._init_auth_failure_state[cookie_id] = state
+            return dict(state)
+
+    @classmethod
+    def clear_init_auth_failure_state(cls, cookie_id: str):
+        if not cookie_id:
+            return
+        with cls._init_auth_failure_lock:
+            cls._init_auth_failure_state.pop(cookie_id, None)
 
     @classmethod
     def _cleanup_qr_login_grace_state(cls):
@@ -1112,9 +1344,20 @@ class XianyuLive:
         self.current_token = None
         self.token_refresh_task = None
         self.connection_restart_flag = False  # 连接重启标志
+        self.last_init_failure_reason = None
+        self.last_init_failure_type = None
+        self.init_auth_failures = 0
+
+        prewarmed_token_info = self.pop_auth_prewarmed_token(self.cookie_id)
+        if prewarmed_token_info:
+            self.current_token = prewarmed_token_info.get('token')
+            self.last_token_refresh_time = prewarmed_token_info.get('timestamp', time.time())
+            logger.info(
+                f"【{cookie_id}】已复用认证预热token，来源: {prewarmed_token_info.get('source') or 'unknown'}"
+            )
 
         prewarmed_token_info = self.pop_qr_prewarmed_token(self.cookie_id)
-        if prewarmed_token_info:
+        if prewarmed_token_info and not self.current_token:
             self.current_token = prewarmed_token_info.get('token')
             self.last_token_refresh_time = prewarmed_token_info.get('timestamp', time.time())
             logger.info(f"【{cookie_id}】已复用扫码预热token，跳过首次token刷新")
@@ -1299,12 +1542,17 @@ class XianyuLive:
         return len(cls._instances)
 
     @classmethod
-    def is_manual_refresh_active(cls, cookie_id: str) -> bool:
-        """检查指定账号是否处于手动刷新保护期"""
+    def is_manual_refresh_active(cls, cookie_id: str, allow_handoff_recovery: bool = False) -> bool:
+        """检查指定账号是否处于手动刷新保护期。"""
         if not cookie_id:
             return False
-        with cls._manual_refresh_lock:
-            return cookie_id in cls._manual_refresh_state
+        state = cls.get_manual_refresh_state(cookie_id)
+        if not state:
+            return False
+        phase = state.get('phase') or 'manual_refresh'
+        if allow_handoff_recovery and phase == 'handoff_recovery':
+            return False
+        return True
 
     @classmethod
     def begin_manual_refresh(cls, cookie_id: str, source: str = "manual_refresh") -> Dict[str, Any]:
@@ -1317,11 +1565,14 @@ class XianyuLive:
         if live_instance is not None:
             previous_cookie_refresh_enabled = live_instance.cookie_refresh_enabled
 
+        cls._cleanup_manual_refresh_state()
         with cls._manual_refresh_lock:
             existing = cls._manual_refresh_state.get(cookie_id)
             if existing:
                 existing["source"] = source
+                existing["phase"] = 'manual_refresh'
                 existing["updated_at"] = time.time()
+                existing["expires_at"] = None
                 return {
                     "started": False,
                     "already_active": True,
@@ -1330,8 +1581,10 @@ class XianyuLive:
 
             cls._manual_refresh_state[cookie_id] = {
                 "source": source,
+                "phase": 'manual_refresh',
                 "started_at": time.time(),
                 "updated_at": time.time(),
+                "expires_at": None,
                 "previous_cookie_refresh_enabled": previous_cookie_refresh_enabled,
             }
 
@@ -1353,6 +1606,7 @@ class XianyuLive:
         if not cookie_id:
             return False
 
+        cls._cleanup_manual_refresh_state()
         with cls._manual_refresh_lock:
             state = cls._manual_refresh_state.pop(cookie_id, None)
 
@@ -4810,7 +5064,19 @@ class XianyuLive:
         window = window_seconds or self.slider_success_reentry_window
         return (time.time() - self.last_slider_success_at) <= window
 
-    async def refresh_token(self, captcha_retry_count: int = 0):
+    async def preflight_token_after_manual_refresh(self) -> str:
+        """手动刷新成功后的 token 预检，确认新实例可直接完成初始化。"""
+        logger.info(f"【{self.cookie_id}】开始执行手动刷新后的Token预检...")
+        self.last_message_received_time = 0
+        token = await self.refresh_token(allow_password_login_recovery=False)
+        if token:
+            self.cache_auth_prewarmed_token(self.cookie_id, token, source='manual_refresh_handoff')
+            logger.info(f"【{self.cookie_id}】手动刷新后的Token预检成功，已缓存预热token供新实例复用")
+            return token
+
+        raise InitAuthError(f"手动刷新后的Token预检失败，状态: {self.last_token_refresh_status or 'unknown'}")
+
+    async def refresh_token(self, captcha_retry_count: int = 0, allow_password_login_recovery: bool = True):
         if self.token_refresh_lock.locked():
             logger.info(f"【{self.cookie_id}】Token刷新已有执行中任务，等待当前流程完成后复用结果")
 
@@ -4823,9 +5089,13 @@ class XianyuLive:
             ):
                 logger.info(f"【{self.cookie_id}】最近15秒内已有成功的Token刷新结果，直接复用当前Token")
                 return self.current_token
-            return await self._refresh_token_impl(captcha_retry_count)
+            return await self._refresh_token_impl(
+                captcha_retry_count,
+                allow_password_login_recovery=allow_password_login_recovery,
+            )
 
-    async def _refresh_token_impl(self, captcha_retry_count: int = 0, post_slider_session_grace_used: bool = False):
+    async def _refresh_token_impl(self, captcha_retry_count: int = 0, post_slider_session_grace_used: bool = False,
+                                  allow_password_login_recovery: bool = True):
         """刷新token
 
         Args:
@@ -4972,6 +5242,10 @@ class XianyuLive:
                                 self.last_message_received_time = 0
                                 logger.warning(f"【{self.cookie_id}】Token刷新成功，已重置消息接收时间标识")
                                 self.clear_qr_login_grace(self.cookie_id)
+                                self.clear_init_auth_failure_state(self.cookie_id)
+                                self.last_init_failure_reason = None
+                                self.last_init_failure_type = None
+                                self.init_auth_failures = 0
 
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
                                 # 标记为成功
@@ -5009,10 +5283,11 @@ class XianyuLive:
                                 return await self._refresh_token_impl(
                                     captcha_retry_count,
                                     post_slider_session_grace_used=post_slider_session_grace_used,
+                                    allow_password_login_recovery=allow_password_login_recovery,
                                 )
                             logger.warning(f"【{self.cookie_id}】浏览器侧Cookie稳定化未消除风控，继续进入滑块验证")
 
-                        if self.is_manual_refresh_active(self.cookie_id):
+                        if self.is_manual_refresh_active(self.cookie_id, allow_handoff_recovery=True):
                             logger.warning(f"【{self.cookie_id}】检测到手动刷新进行中，跳过自动滑块处理")
                             log_captcha_event(
                                 self.cookie_id,
@@ -5103,6 +5378,7 @@ class XianyuLive:
                                 return await self._refresh_token_impl(
                                     captcha_retry_count + 1,
                                     post_slider_session_grace_used=False,
+                                    allow_password_login_recovery=allow_password_login_recovery,
                                 )
                             else:
                                 logger.error(f"【{self.cookie_id}】滑块验证失败")
@@ -5183,7 +5459,7 @@ class XianyuLive:
                                 logger.error(f"【{self.cookie_id}】记录风控日志失败: {log_e}")
 
                             # 调用统一的密码登录刷新方法
-                            if self.is_manual_refresh_active(self.cookie_id):
+                            if self.is_manual_refresh_active(self.cookie_id, allow_handoff_recovery=True):
                                 logger.warning(f"【{self.cookie_id}】检测到手动刷新进行中，跳过自动密码登录刷新")
                                 if token_expired_log_id:
                                     self._update_risk_log(
@@ -5219,14 +5495,19 @@ class XianyuLive:
                                 return await self._refresh_token_impl(
                                     captcha_retry_count,
                                     post_slider_session_grace_used=True,
+                                    allow_password_login_recovery=allow_password_login_recovery,
                                 )
 
-                            refresh_success = await self._try_password_login_refresh(
-                                "令牌/Session过期",
-                                risk_session_id=token_expired_session_id,
-                                trigger_scene=token_trigger_scene,
-                                ignore_slider_failed_backoff=self._has_recent_slider_success(),
-                            )
+                            refresh_success = False
+                            if allow_password_login_recovery:
+                                refresh_success = await self._try_password_login_refresh(
+                                    "令牌/Session过期",
+                                    risk_session_id=token_expired_session_id,
+                                    trigger_scene=token_trigger_scene,
+                                    ignore_slider_failed_backoff=self._has_recent_slider_success(),
+                                )
+                            else:
+                                logger.warning(f"【{self.cookie_id}】当前为预检模式，跳过密码登录恢复，直接返回Token刷新失败")
                             
                             if token_expired_log_id:
                                 self._update_risk_log(
@@ -5254,6 +5535,7 @@ class XianyuLive:
                                 return await self._refresh_token_impl(
                                     captcha_retry_count,
                                     post_slider_session_grace_used=False,
+                                    allow_password_login_recovery=allow_password_login_recovery,
                                 )
                                 
                                 # 刷新失败时继续执行原有的失败处理逻辑
@@ -5362,7 +5644,7 @@ class XianyuLive:
         try:
             logger.info(f"【{self.cookie_id}】开始处理滑块验证...")
 
-            if self.is_manual_refresh_active(self.cookie_id):
+            if self.is_manual_refresh_active(self.cookie_id, allow_handoff_recovery=True):
                 logger.warning(f"【{self.cookie_id}】手动刷新进行中，取消自动滑块处理")
                 log_captcha_event(
                     self.cookie_id,
@@ -5759,7 +6041,7 @@ class XianyuLive:
         except Exception as log_e:
             logger.error(f"【{self.cookie_id}】记录风控日志失败: {log_e}")
 
-        if self.is_manual_refresh_active(self.cookie_id):
+        if self.is_manual_refresh_active(self.cookie_id, allow_handoff_recovery=True):
             logger.warning(f"【{self.cookie_id}】手动刷新进行中，跳过自动密码登录刷新")
             if refresh_risk_log_id:
                 self._update_risk_log(
@@ -5774,6 +6056,9 @@ class XianyuLive:
                 )
             return False
 
+        recovery_lock_owner = f"{self.cookie_id}:{trigger_scene or 'auto_cookie_refresh'}:{int(time.time() * 1000)}"
+        recovery_lock_acquired = False
+
         # 检查是否在密码登录冷却期内，避免重复登录
         current_time = time.time()
         failure_backoff = XianyuLive.get_password_login_failure_backoff(self.cookie_id)
@@ -5781,9 +6066,11 @@ class XianyuLive:
             remaining_time = failure_backoff.get('until', 0) - current_time
             if remaining_time > 0:
                 backoff_reason = failure_backoff.get('reason', 'unknown')
-                if ignore_slider_failed_backoff and backoff_reason == 'slider_failed':
+                if backoff_reason == 'slider_failed' and (
+                    ignore_slider_failed_backoff or self.consume_manual_refresh_slider_failed_bypass(self.cookie_id)
+                ):
                     logger.warning(
-                        f"【{self.cookie_id}】检测到最近刚通过滑块，忽略旧的 slider_failed 退避并继续尝试密码登录刷新"
+                        f"【{self.cookie_id}】检测到最近刚通过滑块或处于刷新交接恢复窗口，忽略一次旧的 slider_failed 退避并继续尝试密码登录刷新"
                     )
                     XianyuLive.clear_password_login_failure_backoff(self.cookie_id)
                     failure_backoff = None
@@ -5827,6 +6114,29 @@ class XianyuLive:
                 )
             return False
 
+        recovery_lock_acquired, existing_lock = XianyuLive.acquire_auth_recovery_lock(
+            self.cookie_id,
+            recovery_lock_owner,
+        )
+        if not recovery_lock_acquired:
+            existing_owner = (existing_lock or {}).get('owner', 'unknown')
+            logger.warning(f"【{self.cookie_id}】认证恢复流程已在执行中，跳过本次重复触发: owner={existing_owner}")
+            if refresh_risk_log_id:
+                self._update_risk_log(
+                    refresh_risk_log_id,
+                    session_id=risk_session_id,
+                    trigger_scene=trigger_scene,
+                    result_code='auth_recovery_in_progress',
+                    processing_status='failed',
+                    error_message='已有认证恢复流程执行中',
+                    duration_ms=max(0, int((time.time() - risk_log_started_at) * 1000)),
+                    event_meta=self._build_risk_event_meta(
+                        trigger_scene=trigger_scene,
+                        extra={**base_event_meta, 'active_owner': existing_owner},
+                    ),
+                )
+            return False
+
         # 记录到日志文件
         log_captcha_event(self.cookie_id, f"{trigger_reason}触发Cookie刷新和实例重启", None,
             f"检测到{trigger_reason}，准备刷新Cookie并重启实例")
@@ -5834,7 +6144,7 @@ class XianyuLive:
         try:
             # 从数据库获取账号登录信息
             account_info = db_manager.get_cookie_details(self.cookie_id)
-            
+
             if not account_info:
                 logger.error(f"【{self.cookie_id}】无法获取账号信息")
                 if refresh_risk_log_id:
@@ -5849,7 +6159,7 @@ class XianyuLive:
                         event_meta=self._build_risk_event_meta(trigger_scene=trigger_scene, extra=base_event_meta),
                     )
                 return False
-            
+
             # 【重要】先检查数据库中的cookie是否已经更新
             # 如果用户已经手动更新了cookie，就不需要触发密码登录刷新
             db_cookie_value = account_info.get('cookie_value', '')
@@ -6042,6 +6352,9 @@ class XianyuLive:
                     event_meta=self._build_risk_event_meta(trigger_scene=trigger_scene, extra=base_event_meta),
                 )
             return False
+        finally:
+            if recovery_lock_acquired:
+                XianyuLive.release_auth_recovery_lock(self.cookie_id, recovery_lock_owner)
 
     async def _verify_cookie_validity(self) -> dict:
         """验证Cookie的有效性，通过实际调用API测试
@@ -10181,13 +10494,20 @@ class XianyuLive:
             await self.refresh_token()
 
         if not self.current_token:
-            logger.error("无法获取有效token，初始化失败")
+            self.last_init_failure_type = 'init_auth_failed'
+            self.last_init_failure_reason = self.last_token_refresh_status or 'token_missing_after_refresh'
+            logger.error(f"【{self.cookie_id}】无法获取有效token，初始化鉴权失败")
             # 只有在没有尝试刷新token的情况下才发送通知，避免与refresh_token中的通知重复
             if not token_refresh_attempted:
                 await self.send_token_refresh_notification("初始化时无法获取有效Token", "token_init_failed")
             else:
-                logger.info("由于刚刚尝试过token刷新，跳过重复的初始化失败通知")
-            raise Exception("Token获取失败")
+                logger.info(f"【{self.cookie_id}】由于刚刚尝试过token刷新，跳过重复的初始化失败通知")
+            raise InitAuthError(f"Token获取失败(status={self.last_init_failure_reason})")
+
+        self.last_init_failure_type = None
+        self.last_init_failure_reason = None
+        self.clear_init_auth_failure_state(self.cookie_id)
+        self.init_auth_failures = 0
 
         msg = {
             "lwp": "/reg",
@@ -13451,6 +13771,17 @@ class XianyuLive:
                         logger.info(f"【{self.cookie_id}】账号已禁用，停止主循环")
                         break
 
+                    init_auth_state = self.get_init_auth_failure_state(self.cookie_id) or {}
+                    circuit_until = init_auth_state.get('circuit_until', 0)
+                    if circuit_until and time.time() < circuit_until:
+                        remaining_seconds = max(1, int(circuit_until - time.time()))
+                        self._set_connection_state(ConnectionState.RECONNECTING, f"初始化鉴权冷静期剩余{remaining_seconds}秒")
+                        logger.warning(
+                            f"【{self.cookie_id}】初始化鉴权失败熔断中，暂停发起新的WebSocket连接，剩余 {remaining_seconds} 秒"
+                        )
+                        await self._interruptible_sleep(remaining_seconds)
+                        continue
+
                     headers = WEBSOCKET_HEADERS.copy()
                     headers['Cookie'] = self.cookies_str
 
@@ -13572,6 +13903,32 @@ class XianyuLive:
                             if self.ws == websocket:
                                 self.ws = None
                                 logger.info(f"【{self.cookie_id}】WebSocket连接已退出，引用已清理")
+
+                except InitAuthError as e:
+                    error_msg = self._safe_str(e)
+                    self.current_token = None
+                    self.connection_failures = 0
+                    init_auth_state = self.record_init_auth_failure(self.cookie_id, error_msg)
+                    self.init_auth_failures = int(init_auth_state.get('count', 0))
+                    self._set_connection_state(ConnectionState.RECONNECTING, f"初始化鉴权失败第{self.init_auth_failures}次")
+                    logger.error(f"【{self.cookie_id}】初始化鉴权失败 ({self.init_auth_failures}/{self._init_auth_failure_threshold})")
+                    logger.error(f"【{self.cookie_id}】初始化失败原因: {error_msg}")
+
+                    retry_delay = self._calculate_retry_delay(error_msg)
+                    circuit_until = init_auth_state.get('circuit_until', 0)
+                    if circuit_until and time.time() < circuit_until:
+                        circuit_wait = max(1, int(circuit_until - time.time()))
+                        retry_delay = max(retry_delay, circuit_wait)
+                        logger.warning(
+                            f"【{self.cookie_id}】初始化鉴权失败已达到阈值，进入冷静期 {circuit_wait} 秒后再重试"
+                        )
+                    else:
+                        logger.warning(f"【{self.cookie_id}】将在 {retry_delay} 秒后重试初始化鉴权...")
+
+                    self._reset_background_tasks()
+                    await self._interruptible_sleep(retry_delay)
+                    logger.info(f"【{self.cookie_id}】初始化鉴权重试等待完成，准备重新建立连接...")
+                    continue
 
                 except Exception as e:
                     error_msg = self._safe_str(e)

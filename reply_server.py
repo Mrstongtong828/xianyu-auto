@@ -2795,6 +2795,32 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         }
                     )
                     return
+
+                if is_refresh_mode:
+                    try:
+                        log_with_user('info', f"刷新模式开始执行Token预检，确认新实例可直接恢复: {account_id}", current_user)
+                        XianyuLive.mark_manual_refresh_handoff(account_id, source=manual_refresh_owner)
+                        temp_xianyu = XianyuLive(
+                            cookies_str=cookies_str,
+                            cookie_id=account_id,
+                            user_id=user_id,
+                        )
+                        asyncio.run(temp_xianyu.preflight_token_after_manual_refresh())
+                        cookies_str = temp_xianyu.cookies_str
+                        merged_cookies_dict = trans_cookies(cookies_str)
+                        log_with_user('info', f"刷新模式Token预检通过，将使用预检后的Cookie继续交接: {account_id}", current_user)
+                    except Exception as preflight_err:
+                        error_message = f"刷新模式认证预检失败，任务未切换: {str(preflight_err)}"
+                        log_with_user('error', f"{error_message}: {account_id}", current_user)
+                        _set_password_login_session_status(session_id, 'failed', error=error_message)
+                        _update_session_risk_log(
+                            session_id,
+                            'failed',
+                            error_message=error_message[:200],
+                            result_code='manual_refresh_preflight_failed',
+                            event_meta={'account_id': account_id},
+                        )
+                        return
                 
                 # 保存账号密码和Cookie到数据库
                 # 使用 update_cookie_account_info 来保存，它会自动处理新账号和现有账号的情况
@@ -2861,7 +2887,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                                 logger.error(traceback.format_exc())
                 
                 if is_refresh_mode:
-                    log_with_user('info', f"刷新模式跳过额外浏览器Cookie刷新，直接使用当前登录结果: {account_id}", current_user)
+                    log_with_user('info', f"刷新模式已完成Token预检，直接切换到通过预检的新Cookie: {account_id}", current_user)
                 else:
                     # 登录成功后，调用_refresh_cookies_via_browser刷新Cookie
                     try:
@@ -2935,7 +2961,11 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                     cookie_count=len(merged_cookies_dict)
                 )
                 # 更新风控日志状态
-                _update_session_risk_log(session_id, 'success', processing_result='Cookie刷新成功')
+                _update_session_risk_log(
+                    session_id,
+                    'success',
+                    processing_result='Cookie刷新成功，认证预检通过' if is_refresh_mode else 'Cookie刷新成功'
+                )
 
                 # 发送登录成功通知（使用模板系统）
                 try:
