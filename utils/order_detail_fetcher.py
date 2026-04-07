@@ -14,6 +14,7 @@ import re
 import json
 from threading import Lock
 from collections import defaultdict
+from utils.time_utils import parse_local_datetime_text_to_db_utc
 
 # 修复Docker环境中的asyncio事件循环策略问题
 if sys.platform.startswith('linux') or os.getenv('DOCKER_ENV'):
@@ -299,6 +300,9 @@ class OrderDetailFetcher:
                                 'quantity': existing_order.get('quantity', ''),
                                 'amount': existing_order.get('amount', ''),
                                 'amount_source': 'cache',
+                                'platform_created_at': existing_order.get('platform_created_at'),
+                                'platform_paid_at': existing_order.get('platform_paid_at'),
+                                'platform_completed_at': existing_order.get('platform_completed_at'),
                                 'timestamp': time.time(),
                                 'from_cache': True  # 标记数据来源
                             }
@@ -449,6 +453,8 @@ class OrderDetailFetcher:
                         logger.warning(f"获取页面标题失败: {e}")
                         title = f"订单详情 - {order_id}"
 
+                    order_time_fields = await self._get_order_time_fields()
+
                     result = {
                         'order_id': order_id,
                         'url': url,
@@ -464,6 +470,9 @@ class OrderDetailFetcher:
                         'spec_parse_mode': self._classify_spec_parse_mode(sku_info),
                         'order_status': order_status,  # 订单状态
                         'order_status_source': self._last_order_status_source,
+                        'platform_created_at': order_time_fields.get('platform_created_at'),
+                        'platform_paid_at': order_time_fields.get('platform_paid_at'),
+                        'platform_completed_at': order_time_fields.get('platform_completed_at'),
                         'timestamp': time.time(),
                         'from_cache': False  # 标记数据来源
                     }
@@ -2227,6 +2236,102 @@ class OrderDetailFetcher:
         except Exception as e:
             logger.error(f"获取订单状态异常: {e}")
             return 'unknown'
+
+    def _extract_labeled_datetime_from_text(self, text: str, labels: List[str]) -> Optional[str]:
+        if not text:
+            return None
+
+        normalized_text = str(text).replace('\u3000', ' ')
+        datetime_pattern = (
+            r'(\d{4}\s*(?:年|[-/.])\s*\d{1,2}\s*(?:月|[-/.])\s*\d{1,2}'
+            r'\s*(?:日)?\s*(?:T|\s+)\s*\d{1,2}\s*:\s*\d{1,2}(?:\s*:\s*\d{1,2})?)'
+        )
+        for label in labels:
+            for pattern in (
+                rf'{re.escape(label)}\s*[:：]?\s*{datetime_pattern}',
+                rf'{re.escape(label)}[^\d]{{0,8}}{datetime_pattern}',
+            ):
+                match = re.search(pattern, normalized_text, re.IGNORECASE | re.S)
+                if not match:
+                    continue
+                parsed = parse_local_datetime_text_to_db_utc(match.group(1))
+                if parsed:
+                    return parsed
+        return None
+
+    def _extract_order_time_fields_from_text(self, text: str) -> Dict[str, str]:
+        if not text:
+            return {}
+
+        result: Dict[str, str] = {}
+        field_label_map = {
+            'platform_created_at': ['创建时间', '下单时间'],
+            'platform_paid_at': ['付款时间', '支付时间'],
+            'platform_completed_at': ['成交时间', '完成时间', '确认收货时间'],
+        }
+
+        for field_name, labels in field_label_map.items():
+            parsed_value = self._extract_labeled_datetime_from_text(text, labels)
+            if parsed_value:
+                result[field_name] = parsed_value
+
+        return result
+
+    async def _get_order_time_fields(self) -> Dict[str, str]:
+        labels = ['创建时间', '下单时间', '付款时间', '支付时间', '成交时间', '完成时间', '确认收货时间']
+        candidate_texts: List[str] = []
+
+        page_text = await self._get_page_text()
+        if page_text:
+            candidate_texts.append(page_text)
+
+        try:
+            text_blocks = await self.page.evaluate(
+                """(labels) => {
+                    const nodes = Array.from(document.querySelectorAll('div, span, p, li, section, article'));
+                    const results = [];
+                    const seen = new Set();
+                    for (const node of nodes) {
+                        const text = String(node.innerText || node.textContent || '')
+                            .replace(/\\s+/g, ' ')
+                            .trim();
+                        if (!text || text.length < 8 || text.length > 120) {
+                            continue;
+                        }
+                        if (!/\\d{4}/.test(text)) {
+                            continue;
+                        }
+                        if (!labels.some((label) => text.includes(label))) {
+                            continue;
+                        }
+                        if (seen.has(text)) {
+                            continue;
+                        }
+                        seen.add(text);
+                        results.push(text);
+                        if (results.length >= 24) {
+                            break;
+                        }
+                    }
+                    return results;
+                }""",
+                labels,
+            )
+            candidate_texts.extend(text_blocks or [])
+        except Exception as e:
+            logger.debug(f"提取订单时间文本块失败: {e}")
+
+        merged_result: Dict[str, str] = {}
+        for candidate_text in candidate_texts:
+            extracted_fields = self._extract_order_time_fields_from_text(candidate_text)
+            for field_name, field_value in extracted_fields.items():
+                if field_value and field_name not in merged_result:
+                    merged_result[field_name] = field_value
+
+        if merged_result:
+            logger.info(f"提取到订单平台时间字段: {merged_result}")
+
+        return merged_result
 
     async def _get_sku_content(self) -> Optional[Dict[str, str]]:
         """获取并解析SKU内容，包括规格、数量和金额，支持双规格"""

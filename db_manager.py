@@ -463,6 +463,9 @@ class DBManager:
                 bargain_success_detected INTEGER DEFAULT 0,
                 order_status TEXT DEFAULT 'unknown',
                 pre_refund_status TEXT,
+                platform_created_at TIMESTAMP,
+                platform_paid_at TIMESTAMP,
+                platform_completed_at TIMESTAMP,
                 cookie_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -946,6 +949,9 @@ Cookie数量: {cookie_count}
                 cursor.execute("ALTER TABLE cookies ADD COLUMN auto_comment INTEGER DEFAULT 0")
                 logger.info("数据库迁移完成：添加auto_comment列")
 
+            # 历史版本可能缺少订单平台时间字段，不能再依赖旧版本号分支触发
+            self._ensure_orders_platform_time_columns(cursor)
+
             # 迁移notification_templates表以支持新的模板类型
             self._migrate_notification_templates(cursor)
 
@@ -989,6 +995,15 @@ Cookie数量: {cookie_count}
             logger.error(f"数据库迁移失败: {e}")
             # 迁移失败不应该阻止程序启动
             pass
+
+    def _ensure_orders_platform_time_columns(self, cursor):
+        """确保 orders 表存在平台时间字段。"""
+        for order_time_column in ("platform_created_at", "platform_paid_at", "platform_completed_at"):
+            try:
+                self._execute_sql(cursor, f"SELECT {order_time_column} FROM orders LIMIT 1")
+            except sqlite3.OperationalError:
+                self._execute_sql(cursor, f"ALTER TABLE orders ADD COLUMN {order_time_column} TIMESTAMP")
+                logger.info(f"为orders表添加平台时间字段({order_time_column})")
 
     def _update_cards_table_constraints(self, cursor):
         """更新cards表的CHECK约束以支持image和yifan_api类型"""
@@ -1325,6 +1340,8 @@ Cookie数量: {cookie_count}
                     self._execute_sql(cursor, "ALTER TABLE orders ADD COLUMN spec_name_2 TEXT")
                     self._execute_sql(cursor, "ALTER TABLE orders ADD COLUMN spec_value_2 TEXT")
                     logger.info("为orders表添加双规格字段(spec_name_2, spec_value_2)")
+
+                self._ensure_orders_platform_time_columns(cursor)
 
                 # 为item_info表添加多规格字段（如果不存在）
                 try:
@@ -6622,7 +6639,9 @@ Cookie数量: {cookie_count}
                               amount: str = None, order_status: str = None, cookie_id: str = None,
                               sid: str = None, spec_name_2: str = None, spec_value_2: str = None,
                               buyer_nick: str = None, pre_refund_status=..., clear_pre_refund_status: bool = False,
-                              bargain_flow_detected=..., bargain_success_detected=...):
+                              bargain_flow_detected=..., bargain_success_detected=...,
+                              platform_created_at: str = None, platform_paid_at: str = None,
+                              platform_completed_at: str = None):
         """插入或更新订单信息
 
         Args:
@@ -6716,6 +6735,15 @@ Cookie数量: {cookie_count}
                     if cookie_id is not None:
                         update_fields.append("cookie_id = ?")
                         update_values.append(cookie_id)
+                    if platform_created_at is not None:
+                        update_fields.append("platform_created_at = ?")
+                        update_values.append(platform_created_at)
+                    if platform_paid_at is not None:
+                        update_fields.append("platform_paid_at = ?")
+                        update_values.append(platform_paid_at)
+                    if platform_completed_at is not None:
+                        update_fields.append("platform_completed_at = ?")
+                        update_values.append(platform_completed_at)
 
                     if update_fields:
                         update_fields.append("updated_at = CURRENT_TIMESTAMP")
@@ -6742,6 +6770,15 @@ Cookie数量: {cookie_count}
                     if bargain_success_detected is not ...:
                         insert_fields.append('bargain_success_detected')
                         insert_values.append(1 if bargain_success_detected else 0)
+                    if platform_created_at is not None:
+                        insert_fields.append('platform_created_at')
+                        insert_values.append(platform_created_at)
+                    if platform_paid_at is not None:
+                        insert_fields.append('platform_paid_at')
+                        insert_values.append(platform_paid_at)
+                    if platform_completed_at is not None:
+                        insert_fields.append('platform_completed_at')
+                        insert_values.append(platform_completed_at)
 
                     if has_pre_refund_status and not clear_pre_refund_status:
                         insert_fields.append('pre_refund_status')
@@ -6767,7 +6804,9 @@ Cookie数量: {cookie_count}
                 cursor = self.conn.cursor()
                 cursor.execute('''
                 SELECT order_id, item_id, buyer_id, buyer_nick, sid, spec_name, spec_value,
-                       spec_name_2, spec_value_2, quantity, amount, bargain_flow_detected, bargain_success_detected, order_status, pre_refund_status, cookie_id, created_at, updated_at
+                       spec_name_2, spec_value_2, quantity, amount, bargain_flow_detected, bargain_success_detected,
+                       order_status, pre_refund_status, cookie_id, platform_created_at, platform_paid_at,
+                       platform_completed_at, created_at, updated_at
                 FROM orders WHERE order_id = ?
                 ''', (order_id,))
 
@@ -6790,8 +6829,11 @@ Cookie数量: {cookie_count}
                         'order_status': row[13],
                         'pre_refund_status': row[14],
                         'cookie_id': row[15],
-                        'created_at': row[16],
-                        'updated_at': row[17]
+                        'platform_created_at': row[16],
+                        'platform_paid_at': row[17],
+                        'platform_completed_at': row[18],
+                        'created_at': row[19],
+                        'updated_at': row[20]
                     }
                 return None
 
@@ -6820,7 +6862,8 @@ Cookie数量: {cookie_count}
                 cursor = self.conn.cursor()
                 cursor.execute('''
                 SELECT order_id, item_id, buyer_id, buyer_nick, sid, spec_name, spec_value,
-                       spec_name_2, spec_value_2, quantity, amount, order_status, created_at, updated_at
+                       spec_name_2, spec_value_2, quantity, amount, order_status,
+                       platform_created_at, platform_paid_at, platform_completed_at, created_at, updated_at
                 FROM orders WHERE cookie_id = ?
                 ORDER BY created_at DESC LIMIT ?
                 ''', (cookie_id, limit))
@@ -6840,8 +6883,11 @@ Cookie数量: {cookie_count}
                         'quantity': row[9],
                         'amount': row[10],
                         'order_status': row[11],
-                        'created_at': row[12],
-                        'updated_at': row[13]
+                        'platform_created_at': row[12],
+                        'platform_paid_at': row[13],
+                        'platform_completed_at': row[14],
+                        'created_at': row[15],
+                        'updated_at': row[16]
                     })
 
                 return orders
@@ -7308,7 +7354,9 @@ Cookie数量: {cookie_count}
                 if has_yifan_fields:
                     cursor.execute('''
                     SELECT order_id, item_id, buyer_id, spec_name, spec_value,
-                           quantity, amount, order_status, cookie_id, created_at, updated_at,
+                           quantity, amount, order_status, cookie_id,
+                           platform_created_at, platform_paid_at, platform_completed_at,
+                           created_at, updated_at,
                            yifan_orderno, delivery_status, callback_data, chat_id
                     FROM orders WHERE order_id = ?
                     ''', (order_id,))
@@ -7325,18 +7373,23 @@ Cookie数量: {cookie_count}
                             'amount': row[6],
                             'order_status': row[7],
                             'cookie_id': row[8],
-                            'created_at': row[9],
-                            'updated_at': row[10],
-                            'yifan_orderno': row[11],
-                            'delivery_status': row[12],
-                            'callback_data': row[13],
-                            'chat_id': row[14]
+                            'platform_created_at': row[9],
+                            'platform_paid_at': row[10],
+                            'platform_completed_at': row[11],
+                            'created_at': row[12],
+                            'updated_at': row[13],
+                            'yifan_orderno': row[14],
+                            'delivery_status': row[15],
+                            'callback_data': row[16],
+                            'chat_id': row[17]
                         }
                 else:
                     # 使用旧的查询方式
                     cursor.execute('''
                     SELECT order_id, item_id, buyer_id, spec_name, spec_value,
-                           quantity, amount, order_status, cookie_id, created_at, updated_at
+                           quantity, amount, order_status, cookie_id,
+                           platform_created_at, platform_paid_at, platform_completed_at,
+                           created_at, updated_at
                     FROM orders WHERE order_id = ?
                     ''', (order_id,))
                     
@@ -7352,8 +7405,11 @@ Cookie数量: {cookie_count}
                             'amount': row[6],
                             'order_status': row[7],
                             'cookie_id': row[8],
-                            'created_at': row[9],
-                            'updated_at': row[10]
+                            'platform_created_at': row[9],
+                            'platform_paid_at': row[10],
+                            'platform_completed_at': row[11],
+                            'created_at': row[12],
+                            'updated_at': row[13]
                         }
                 
                 return None

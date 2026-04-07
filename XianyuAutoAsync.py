@@ -9214,6 +9214,9 @@ class XianyuLive:
                     quantity = _normalize_optional_text(result.get('quantity'))
                     amount = _normalize_amount_text(result.get('amount'))
                     amount_source = _normalize_optional_text(result.get('amount_source')) or 'unknown'
+                    platform_created_at = _normalize_optional_text(result.get('platform_created_at'))
+                    platform_paid_at = _normalize_optional_text(result.get('platform_paid_at'))
+                    platform_completed_at = _normalize_optional_text(result.get('platform_completed_at'))
                     item_config = db_manager.get_item_info(self.cookie_id, item_id) if item_id else None
                     item_config_multi_spec = bool(item_config and item_config.get('is_multi_spec'))
                     item_config_detail = _normalize_optional_text(item_config.get('item_detail')) if item_config else None
@@ -9411,7 +9414,10 @@ class XianyuLive:
                                 quantity=quantity,
                                 amount=amount,
                                 cookie_id=self.cookie_id,
-                                order_status=order_status_to_save  # 外部详情状态仅在不会回退内部状态时写库
+                                order_status=order_status_to_save,  # 外部详情状态仅在不会回退内部状态时写库
+                                platform_created_at=platform_created_at,
+                                platform_paid_at=platform_paid_at,
+                                platform_completed_at=platform_completed_at
                             )
                             
                             # 使用订单状态处理器设置状态

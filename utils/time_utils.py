@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -41,6 +42,38 @@ def to_db_utc_string(value: datetime) -> str:
     else:
         aware_value = value
     return aware_value.astimezone(UTC).strftime(DB_DATETIME_FORMAT)
+
+
+def parse_local_datetime_text_to_db_utc(value: str) -> Optional[str]:
+    """将中文/本地时间文本解析为数据库使用的 UTC 时间字符串。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = re.sub(r"\s+", " ", text.replace("\u3000", " ")).strip()
+    match = re.search(
+        r"(?P<year>\d{4})\s*(?:年|[-/.])\s*(?P<month>\d{1,2})\s*(?:月|[-/.])\s*(?P<day>\d{1,2})"
+        r"\s*(?:日)?\s*(?:T|\s+)\s*(?P<hour>\d{1,2})\s*:\s*(?P<minute>\d{1,2})"
+        r"(?:\s*:\s*(?P<second>\d{1,2}))?",
+        normalized,
+    )
+    if not match:
+        return None
+
+    try:
+        local_datetime = datetime(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+            int(match.group("hour")),
+            int(match.group("minute")),
+            int(match.group("second") or 0),
+            tzinfo=LOCAL_TIMEZONE,
+        )
+    except ValueError:
+        return None
+
+    return to_db_utc_string(local_datetime)
 
 
 def local_date_to_utc_start(date_str: str) -> Optional[str]:
