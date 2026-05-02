@@ -5118,16 +5118,6 @@ class XianyuSliderStealth:
             if warmed_cookies:
                 cookies_dict = warmed_cookies
 
-        warmup_hint_result = self._consume_browser_cookie_warmup_verification_hint(
-            context,
-            target_page,
-            cookies_dict,
-            notification_callback=notification_callback,
-            notification_scene=notification_scene,
-        )
-        if warmup_hint_result is not None:
-            return warmup_hint_result
-
         pending_identity_error_before = self.last_login_error
         pending_identity_result = self._handle_pending_identity_verification_state(
             context,
@@ -5140,20 +5130,6 @@ class XianyuSliderStealth:
             return pending_identity_result
         if self.last_login_error and self.last_login_error != pending_identity_error_before:
             return None
-
-        missing_protected_fields = [
-            key for key in self._PROTECTED_SESSION_COOKIE_FIELDS
-            if not cookies_dict.get(key)
-        ]
-        if missing_protected_fields and getattr(self, 'last_browser_cookie_warmup_session_unready', False):
-            self._log_cookie_snapshot_integrity(cookies_dict, f"{scene}完成后")
-            logger.error(
-                f"【{self.pure_user_id}】❌ {scene}后关键Cookie仍未齐全，且浏览器业务预热仍提示服务端Session未就绪: "
-                f"{missing_protected_fields}"
-            )
-            return self._fail_login(
-                f"{scene}后关键Cookie仍未齐全，服务端Session仍未就绪: {', '.join(missing_protected_fields)}"
-            )
 
         missing_required_fields = [
             key for key in self._REQUIRED_SESSION_COOKIE_FIELDS
@@ -5457,10 +5433,13 @@ class XianyuSliderStealth:
         try:
             login_success, _ = self._wait_for_context_login(context, fallback_page, max_wait_time=wait_timeout, check_interval=10)
         finally:
-            if self.keep_verification_screenshots:
+            if screenshot_path:
+                logger.info(
+                    f"【{self.pure_user_id}】验证流程结束后暂不自动删除验证截图，"
+                    f"改由会话过期或手动清理: {screenshot_path}"
+                )
+            elif self.keep_verification_screenshots:
                 logger.info(f"【{self.pure_user_id}】保留验证截图供后续调试")
-            else:
-                self._cleanup_verification_screenshots()
 
         if not login_success:
             logger.error(f"【{self.pure_user_id}】❌ 等待验证超时（{wait_timeout}秒）")
@@ -9043,26 +9022,21 @@ class XianyuSliderStealth:
                 logger.info(f"【{self.pure_user_id}】检测到验证类型: 短信验证")
                 return 'sms_verify'
 
-            # 3. 已超时/失效的人脸页通常需要回到二维码重新开始，不应继续误标为 face_verify
-            if self._is_timed_out_verification_text(detection_text):
-                logger.info(f"【{self.pure_user_id}】检测到验证页已超时/失效，按二维码恢复页处理")
-                return 'qr_verify'
-
-            # 4. 检查是否是人脸验证
+            # 3. 检查是否是人脸验证
             face_keywords = ['人脸', '刷脸', '面部', '拍摄脸部', '刷脸验证', '人脸验证']
             for keyword in face_keywords:
                 if keyword in detection_text_lower:
                     logger.info(f"【{self.pure_user_id}】检测到验证类型: 人脸验证 (关键词: {keyword})")
                     return 'face_verify'
 
-            # 5. 检查是否是二维码验证
+            # 4. 检查是否是二维码验证
             qr_keywords = ['扫码', '二维码', '扫一扫', '手机淘宝', '手机扫码']
             for keyword in qr_keywords:
                 if keyword in detection_text:
                     logger.info(f"【{self.pure_user_id}】检测到验证类型: 二维码验证 (关键词: {keyword})")
                     return 'qr_verify'
 
-            # 6. 检查 URL 特征
+            # 5. 检查 URL 特征
             frame_url = ""
             try:
                 frame_url = frame.url if hasattr(frame, 'url') else ""
@@ -10823,7 +10797,39 @@ class XianyuSliderStealth:
                     logger.info(f"【{self.pure_user_id}】等待1秒后获取Cookie...")
                     time.sleep(1)
                     try:
-                        cookies_result = self._finalize_logged_in_cookies(
+                        cookies_dict = self._snapshot_context_cookies(context, page=active_page or page)
+                        if observed_set_cookie_updates:
+                            merged_from_network = dict(cookies_dict)
+                            merged_from_network.update(observed_set_cookie_updates)
+                            cookies_dict = merged_from_network
+                            observed_names = sorted(observed_set_cookie_updates.keys())
+                            observed_protected = [
+                                key for key in self._PROTECTED_SESSION_COOKIE_FIELDS
+                                if key in observed_set_cookie_updates
+                            ]
+                            logger.info(
+                                f"【{self.pure_user_id}】已合并登录响应中的 {len(observed_set_cookie_updates)} 个Set-Cookie 到最终Cookie快照: "
+                                f"{observed_names[:16]}{' ...' if len(observed_names) > 16 else ''}"
+                            )
+                            if observed_protected:
+                                logger.info(
+                                    f"【{self.pure_user_id}】登录响应中包含关键会话Cookie: {observed_protected}"
+                                )
+                        missing_protected_fields = [
+                            key for key in self._PROTECTED_SESSION_COOKIE_FIELDS
+                            if not cookies_dict.get(key)
+                        ]
+                        if missing_protected_fields:
+                            stabilized_cookies = self._stabilize_logged_in_context_cookies(
+                                context,
+                                active_page or page,
+                                scene="密码登录完成后",
+                            )
+                            if stabilized_cookies:
+                                cookies_dict = stabilized_cookies
+
+                        pending_identity_error_before = self.last_login_error
+                        pending_identity_result = self._handle_pending_identity_verification_state(
                             context,
                             active_page or page,
                             scene="密码登录完成后",
@@ -10831,7 +10837,27 @@ class XianyuSliderStealth:
                             notification_scene=notification_scene,
                             extra_cookie_updates=observed_set_cookie_updates or None,
                         )
-                        if cookies_result:
+                        if pending_identity_result is not None:
+                            return pending_identity_result
+                        if self.last_login_error and self.last_login_error != pending_identity_error_before:
+                            return None
+                        
+                        logger.info(f"【{self.pure_user_id}】成功获取Cookie，包含 {len(cookies_dict)} 个字段")
+                        
+                        # 打印关键Cookie字段
+                        important_keys = list(self._REQUIRED_SESSION_COOKIE_FIELDS) + list(self._OBSERVED_SESSION_COOKIE_FIELDS)
+                        logger.info(f"【{self.pure_user_id}】关键Cookie字段检查:")
+                        for key in important_keys:
+                            if key in cookies_dict:
+                                val = cookies_dict[key]
+                                logger.info(f"【{self.pure_user_id}】  ✅ {key}: {'存在' if val else '为空'} (长度: {len(str(val)) if val else 0})")
+                            else:
+                                logger.info(f"【{self.pure_user_id}】  ❌ {key}: 缺失")
+                        
+                        logger.info("=" * 60)
+
+                        if cookies_dict:
+                            self._log_cookie_snapshot_integrity(cookies_dict, "密码登录完成后")
                             logger.success("✅ 登录成功！Cookie有效")
                         return cookies_result
                     except Exception as e:
@@ -10857,7 +10883,7 @@ class XianyuSliderStealth:
                         except Exception as close_context_err:
                             close_errors.append(f"context.close: {close_context_err}")
 
-                        if effective_clean_context and browser:
+                        if force_clean_context and browser:
                             try:
                                 browser.close()
                             except Exception as close_browser_err:
@@ -10881,7 +10907,7 @@ class XianyuSliderStealth:
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器超时，改为后台继续清理，避免阻塞密码登录会话收尾")
                     elif close_errors:
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器时出现异常: {close_errors}")
-                    elif effective_clean_context:
+                    elif force_clean_context:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，干净上下文已销毁")
                     else:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，缓存已保存")
