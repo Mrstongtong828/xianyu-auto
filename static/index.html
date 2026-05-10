@@ -3048,6 +3048,176 @@
             </div>
           </div>
         </div>
+
+        <!-- 飞书聊一聊配置 -->
+        <div class="row mt-4">
+          <div class="col-12">
+            <div class="card">
+              <div class="card-header">
+                <i class="bi bi-chat-left-dots me-2"></i>飞书聊一聊（议价）
+                <span class="badge bg-info ms-2">v1.0</span>
+              </div>
+              <div class="card-body">
+                <div class="alert alert-info mb-3">
+                  <i class="bi bi-info-circle me-2"></i>
+                  <strong>功能说明：</strong>在飞书群聊中@机器人并发送闲鱼商品链接，系统会自动使用指定闲鱼账号向卖家发送议价消息。
+                  <a href="javascript:void(0)" onclick="showFeishuBargainDoc()" class="alert-link">查看详细文档</a>
+                </div>
+
+                <div class="row">
+                  <!-- 启用开关 -->
+                  <div class="col-md-12 mb-3">
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" id="feishuBargainEnabled">
+                      <label class="form-check-label" for="feishuBargainEnabled">
+                        <strong>启用飞书聊一聊功能</strong>
+                      </label>
+                    </div>
+                    <div class="form-text">
+                      <i class="bi bi-info-circle me-1"></i>
+                      开启后，飞书机器人将接收并处理议价请求
+                    </div>
+                  </div>
+
+                  <!-- 飞书应用配置 -->
+                  <div class="col-md-6">
+                    <h6 class="mb-3 text-primary">
+                      <i class="bi bi-app me-2"></i>飞书应用配置
+                    </h6>
+                    <div class="mb-3">
+                      <label for="feishuAppId" class="form-label">
+                        <i class="bi bi-key me-1"></i>App ID
+                      </label>
+                      <input type="text" class="form-control" id="feishuAppId" placeholder="请输入飞书应用的 App ID">
+                      <div class="form-text">在飞书开放平台 - 应用凭证中获取</div>
+                    </div>
+                    <div class="mb-3">
+                      <label for="feishuAppSecret" class="form-label">
+                        <i class="bi bi-lock me-1"></i>App Secret
+                      </label>
+                      <div class="input-group">
+                        <input type="password" class="form-control" id="feishuAppSecret" placeholder="请输入飞书应用的 App Secret">
+                        <button class="btn btn-outline-secondary" type="button" onclick="togglePasswordVisibility('feishuAppSecret')">
+                          <i class="bi bi-eye" id="feishuAppSecret-icon"></i>
+                        </button>
+                      </div>
+                      <div class="form-text">用于验证飞书请求的合法性</div>
+                    </div>
+                    <div class="mb-3">
+                      <label for="feishuEncryptKey" class="form-label">
+                        <i class="bi bi-shield-lock me-1"></i>Encrypt Key
+                      </label>
+                      <div class="input-group">
+                        <input type="password" class="form-control" id="feishuEncryptKey" placeholder="可选，用于加密事件推送">
+                        <button class="btn btn-outline-secondary" type="button" onclick="togglePasswordVisibility('feishuEncryptKey')">
+                          <i class="bi bi-eye" id="feishuEncryptKey-icon"></i>
+                        </button>
+                      </div>
+                      <div class="form-text">在飞书开放平台 - 事件订阅 - 加密策略中设置</div>
+                    </div>
+                  </div>
+
+                  <!-- 议价账号配置 -->
+                  <div class="col-md-6">
+                    <h6 class="mb-3 text-success">
+                      <i class="bi bi-person-circle me-2"></i>议价账号配置
+                    </h6>
+                    <div class="mb-3">
+                      <label for="feishuBargainAccount" class="form-label">
+                        <i class="bi bi-box-arrow-in-right me-1"></i>议价账号
+                      </label>
+                      <select class="form-select" id="feishuBargainAccount">
+                        <option value="">请选择用于议价的闲鱼账号</option>
+                      </select>
+                      <div class="form-text">该账号将用于向卖家发送议价消息</div>
+                    </div>
+                    <div class="mb-3">
+                      <label for="feishuDefaultBargainText" class="form-label">
+                        <i class="bi bi-chat-left-text me-1"></i>默认议价话术
+                      </label>
+                      <textarea class="form-control" id="feishuDefaultBargainText" rows="3" placeholder="请输入默认的议价消息内容">老板你好！请问这个还在吗？</textarea>
+                      <div class="form-text">当飞书消息中没有附带议价内容时，将使用此默认话术</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 防封设置 -->
+                <div class="row mt-3">
+                  <div class="col-12">
+                    <h6 class="mb-3 text-warning">
+                      <i class="bi bi-shield-check me-2"></i>防封保护设置
+                    </h6>
+                    <div class="row">
+                      <div class="col-md-4">
+                        <div class="mb-3">
+                          <label for="feishuMinDelay" class="form-label">最小延迟（秒）</label>
+                          <input type="number" class="form-control" id="feishuMinDelay" value="2" min="1" max="10">
+                          <div class="form-text">进入聊天框后的最短等待时间</div>
+                        </div>
+                      </div>
+                      <div class="col-md-4">
+                        <div class="mb-3">
+                          <label for="feishuMaxDelay" class="form-label">最大延迟（秒）</label>
+                          <input type="number" class="form-control" id="feishuMaxDelay" value="5" min="2" max="15">
+                          <div class="form-text">进入聊天框后的最长等待时间</div>
+                        </div>
+                      </div>
+                      <div class="col-md-4">
+                        <div class="mb-3">
+                          <label for="feishuHourlyLimit" class="form-label">每小时限制（条）</label>
+                          <input type="number" class="form-control" id="feishuHourlyLimit" value="10" min="1" max="50">
+                          <div class="form-text">每个账号每小时最多发送条数</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="alert alert-warning">
+                      <i class="bi bi-exclamation-triangle me-2"></i>
+                      <strong>防封建议：</strong>新账号建议使用更保守的设置（延迟5-10秒，每小时5条），老账号可适当放宽。
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Webhook地址 -->
+                <div class="row mt-3">
+                  <div class="col-12">
+                    <h6 class="mb-3 text-info">
+                      <i class="bi bi-link-45deg me-2"></i>Webhook 配置
+                    </h6>
+                    <div class="input-group mb-2">
+                      <span class="input-group-text"><i class="bi bi-globe"></i></span>
+                      <input type="text" class="form-control" id="feishuWebhookUrl" readonly>
+                      <button class="btn btn-outline-secondary" type="button" onclick="copyFeishuWebhookUrl()">
+                        <i class="bi bi-clipboard me-1"></i>复制
+                      </button>
+                    </div>
+                    <div class="form-text">
+                      <i class="bi bi-info-circle me-1"></i>
+                      将此地址填入飞书开放平台 - 事件订阅 - 请求地址中
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="row mt-4">
+                  <div class="col-12">
+                    <div id="feishuBargainStatus" class="mb-3" style="display: none;">
+                      <div class="alert alert-info mb-0">
+                        <i class="bi bi-info-circle me-2"></i>
+                        <span id="feishuBargainStatusText"></span>
+                      </div>
+                    </div>
+                    <button type="button" class="btn btn-primary" onclick="saveFeishuBargainConfig()">
+                      <i class="bi bi-check-circle me-1"></i>保存配置
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary ms-2" onclick="testFeishuBargainConfig()">
+                      <i class="bi bi-play-circle me-1"></i>测试连接
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -4257,6 +4427,7 @@
   <!-- JS依赖 -->
   <script src="/static/lib/bootstrap/bootstrap.bundle.min.js"></script>
   <script src="/static/js/app.js?v=1.2.9"></script>
+  <script src="/static/js/feishu-bargain.js?v=1.0"></script>
 
   <!-- 默认回复管理模态框 -->
   <div class="modal fade" id="defaultReplyModal" tabindex="-1" aria-labelledby="defaultReplyModalLabel" aria-hidden="true">

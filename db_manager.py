@@ -4250,8 +4250,12 @@ Cookie数量: {cookie_count}
         try:
             import aiohttp
 
-            # 使用GET请求发送邮件
-            api_url = "https://dy.zhinianboke.com/api/emailSend"
+            # 使用 GET 请求发送邮件（兼容旧版默认服务）
+            # 注意：部分公共邮件 API 可能存在证书过期/不稳定等问题，因此提供可配置项。
+            api_url = (self.get_system_setting('email_api_url') or '').strip() or "https://dy.zhinianboke.com/api/emailSend"
+            timeout_seconds = int(self.get_system_setting('email_api_timeout') or 15)
+            # 是否校验证书：默认关闭（避免默认服务证书过期导致验证码无法发送）
+            verify_ssl = (self.get_system_setting('email_api_verify_ssl') or 'false').lower() == 'true'
             params = {
                 'subject': subject,
                 'receiveUser': email,
@@ -4261,16 +4265,42 @@ Cookie数量: {cookie_count}
             async with aiohttp.ClientSession() as session:
                 try:
                     logger.info(f"使用API发送验证码邮件: {email}")
-                    async with session.get(api_url, params=params, timeout=15) as response:
+                    ssl_param = None if verify_ssl else False
+                    async with session.get(api_url, params=params, timeout=timeout_seconds, ssl=ssl_param) as response:
                         response_text = await response.text()
                         logger.info(f"邮件API响应: {response.status}")
 
-                        if response.status == 200:
+                        # HTTP 状态码不为 200 直接失败
+                        if response.status != 200:
+                            logger.error(
+                                f"API发送验证码邮件失败: {email}, 状态码: {response.status}, 响应: {response_text[:200]}"
+                            )
+                            return False
+
+                        # 兼容不同 API 返回格式：优先解析 JSON 并判断 success/data 字段
+                        success = False
+                        try:
+                            payload = await response.json(content_type=None)
+                            if isinstance(payload, dict):
+                                # 常见：{"success": true} / {"data": "success"} / {"data": true}
+                                if payload.get('success') is True:
+                                    success = True
+                                else:
+                                    data_value = payload.get('data')
+                                    if data_value is True or str(data_value).lower() in {'success', 'ok', 'true', '1'}:
+                                        success = True
+                        except Exception:
+                            # 非 JSON / 解析失败：退化为文本判断
+                            success = str(response_text).strip().lower() in {'ok', 'success', 'true', '1'}
+
+                        if success:
                             logger.info(f"验证码邮件发送成功(API): {email}")
                             return True
-                        else:
-                            logger.error(f"API发送验证码邮件失败: {email}, 状态码: {response.status}, 响应: {response_text[:200]}")
-                            return False
+
+                        logger.error(
+                            f"API发送验证码邮件返回失败: {email}, 响应: {response_text[:300]}"
+                        )
+                        return False
                 except Exception as e:
                     logger.error(f"API邮件发送异常: {email}, 错误: {e}")
                     return False
