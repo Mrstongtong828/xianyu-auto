@@ -899,7 +899,11 @@ Cookie数量: {cookie_count}
             ('smtp_from', '', '发件人显示名（留空则使用邮箱地址）'),
             ('smtp_use_tls', 'true', '是否启用TLS'),
             ('smtp_use_ssl', 'false', '是否启用SSL'),
-            ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥')
+            ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥'),
+            ('risk_auth_throttle_window_minutes', '30', '自动账密恢复熔断统计窗口（分钟）'),
+            ('risk_auth_throttle_failure_threshold', '3', '自动账密恢复熔断失败次数阈值'),
+            ('risk_health_alert_enabled', 'true', '是否开启风控健康摘要告警'),
+            ('risk_health_alert_cooldown_minutes', '60', '风控健康摘要告警冷却时间（分钟）')
             ''')
 
             # 检查并升级数据库
@@ -999,6 +1003,19 @@ Cookie数量: {cookie_count}
             self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_cookie_created ON risk_control_logs(cookie_id, created_at DESC)")
             self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_type_status_created ON risk_control_logs(event_type, processing_status, created_at DESC)")
             self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_session_id ON risk_control_logs(session_id)")
+
+            risk_setting_defaults = [
+                ('risk_auth_throttle_window_minutes', '30', '自动账密恢复熔断统计窗口（分钟）'),
+                ('risk_auth_throttle_failure_threshold', '3', '自动账密恢复熔断失败次数阈值'),
+                ('risk_health_alert_enabled', 'true', '是否开启风控健康摘要告警'),
+                ('risk_health_alert_cooldown_minutes', '60', '风控健康摘要告警冷却时间（分钟）'),
+            ]
+            for key, value, description in risk_setting_defaults:
+                self._execute_sql(
+                    cursor,
+                    "INSERT OR IGNORE INTO system_settings (key, value, description) VALUES (?, ?, ?)",
+                    (key, value, description),
+                )
 
         except Exception as e:
             logger.error(f"数据库迁移失败: {e}")
@@ -8558,6 +8575,202 @@ Cookie数量: {cookie_count}
         except Exception as e:
             logger.error(f"获取风控日志数量失败: {e}")
             return 0
+
+    def get_recent_risk_control_failure_summary(
+        self,
+        cookie_ids: Optional[List[str]] = None,
+        lookback_minutes: int = 60,
+    ) -> Dict[str, Any]:
+        """汇总近一段时间的风控失败/处理中情况，用于熔断和看板告警。"""
+
+        def _normalize_cookie_ids(values: Optional[List[str]]) -> Optional[List[str]]:
+            if values is None:
+                return None
+            normalized = []
+            for value in values:
+                text = str(value or '').strip()
+                if text:
+                    normalized.append(text)
+            return normalized
+
+        safe_minutes = max(1, min(int(lookback_minutes or 60), 7 * 24 * 60))
+        normalized_cookie_ids = _normalize_cookie_ids(cookie_ids)
+        empty_summary = {
+            'lookback_minutes': safe_minutes,
+            'failed_count': 0,
+            'processing_count': 0,
+            'slider_failed_count': 0,
+            'cookie_refresh_failed_count': 0,
+            'risk_protected_count': 0,
+            'accounts_with_failures': 0,
+            'accounts_with_processing': 0,
+            'top_failed_accounts': [],
+            'latest_failed_at': None,
+            'latest_processing_at': None,
+        }
+
+        if cookie_ids is not None and not normalized_cookie_ids:
+            return empty_summary
+
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                conditions = ["datetime(COALESCE(updated_at, created_at)) >= datetime('now', '-' || ? || ' minutes')"]
+                params: List[Any] = [safe_minutes]
+
+                if normalized_cookie_ids is not None:
+                    placeholders = ', '.join(['?'] * len(normalized_cookie_ids))
+                    conditions.append(f"cookie_id IN ({placeholders})")
+                    params.extend(normalized_cookie_ids)
+
+                where_clause = ' WHERE ' + ' AND '.join(conditions)
+
+                cursor.execute(
+                    f'''
+                    SELECT
+                        COALESCE(SUM(CASE WHEN processing_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+                        COALESCE(SUM(CASE WHEN processing_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing_count,
+                        COALESCE(SUM(CASE WHEN processing_status = 'failed'
+                            AND (event_type = 'slider_captcha' OR result_code = 'password_login_slider_failed')
+                            THEN 1 ELSE 0 END), 0) AS slider_failed_count,
+                        COALESCE(SUM(CASE WHEN processing_status = 'failed'
+                            AND event_type = 'cookie_refresh'
+                            THEN 1 ELSE 0 END), 0) AS cookie_refresh_failed_count,
+                        COALESCE(SUM(CASE WHEN result_code = 'account_risk_protected' THEN 1 ELSE 0 END), 0) AS risk_protected_count,
+                        COUNT(DISTINCT CASE WHEN processing_status = 'failed' THEN cookie_id END) AS accounts_with_failures,
+                        COUNT(DISTINCT CASE WHEN processing_status = 'processing' THEN cookie_id END) AS accounts_with_processing,
+                        MAX(CASE WHEN processing_status = 'failed' THEN COALESCE(updated_at, created_at) END) AS latest_failed_at,
+                        MAX(CASE WHEN processing_status = 'processing' THEN COALESCE(updated_at, created_at) END) AS latest_processing_at
+                    FROM risk_control_logs
+                    {where_clause}
+                    ''',
+                    params,
+                )
+                row = cursor.fetchone() or (0, 0, 0, 0, 0, 0, 0, None, None)
+
+                cursor.execute(
+                    f'''
+                    SELECT
+                        cookie_id,
+                        COUNT(*) AS failed_count,
+                        SUM(CASE WHEN event_type = 'slider_captcha' OR result_code = 'password_login_slider_failed' THEN 1 ELSE 0 END) AS slider_failed_count,
+                        MAX(COALESCE(updated_at, created_at)) AS latest_failed_at
+                    FROM risk_control_logs
+                    {where_clause}
+                      AND processing_status = 'failed'
+                    GROUP BY cookie_id
+                    ORDER BY failed_count DESC, datetime(latest_failed_at) DESC
+                    LIMIT 5
+                    ''',
+                    params,
+                )
+                top_failed_accounts = [
+                    {
+                        'cookie_id': item[0],
+                        'failed_count': int(item[1] or 0),
+                        'slider_failed_count': int(item[2] or 0),
+                        'latest_failed_at': item[3],
+                    }
+                    for item in cursor.fetchall()
+                ]
+
+                return {
+                    'lookback_minutes': safe_minutes,
+                    'failed_count': int(row[0] or 0),
+                    'processing_count': int(row[1] or 0),
+                    'slider_failed_count': int(row[2] or 0),
+                    'cookie_refresh_failed_count': int(row[3] or 0),
+                    'risk_protected_count': int(row[4] or 0),
+                    'accounts_with_failures': int(row[5] or 0),
+                    'accounts_with_processing': int(row[6] or 0),
+                    'latest_failed_at': row[7],
+                    'latest_processing_at': row[8],
+                    'top_failed_accounts': top_failed_accounts,
+                }
+        except Exception as e:
+            logger.error(f"获取近期风控失败摘要失败: {e}")
+            return empty_summary
+
+    def should_throttle_auth_recovery(
+        self,
+        cookie_id: str,
+        lookback_minutes: int = 30,
+        failure_threshold: int = 3,
+    ) -> Dict[str, Any]:
+        """判断账号是否应暂停自动账密恢复，避免短时间连续失败继续触发平台风控。"""
+        safe_cookie_id = str(cookie_id or '').strip()
+        safe_minutes = max(1, min(int(lookback_minutes or 30), 24 * 60))
+        safe_threshold = max(1, int(failure_threshold or 3))
+
+        result = {
+            'should_throttle': False,
+            'cookie_id': safe_cookie_id,
+            'lookback_minutes': safe_minutes,
+            'failure_threshold': safe_threshold,
+            'failure_count': 0,
+            'slider_failed_count': 0,
+            'risk_protected_count': 0,
+            'latest_failed_at': None,
+            'reason': '',
+        }
+        if not safe_cookie_id:
+            return result
+
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    '''
+                    SELECT
+                        COUNT(*) AS failure_count,
+                        COALESCE(SUM(CASE WHEN event_type = 'slider_captcha' OR result_code = 'password_login_slider_failed' THEN 1 ELSE 0 END), 0) AS slider_failed_count,
+                        COALESCE(SUM(CASE WHEN result_code = 'account_risk_protected' THEN 1 ELSE 0 END), 0) AS risk_protected_count,
+                        MAX(COALESCE(updated_at, created_at)) AS latest_failed_at
+                    FROM risk_control_logs
+                    WHERE cookie_id = ?
+                      AND processing_status = 'failed'
+                      AND COALESCE(result_code, '') NOT IN (
+                          'risk_recovery_throttled',
+                          'password_login_backoff',
+                          'password_login_cooldown',
+                          'auth_recovery_in_progress',
+                          'manual_refresh_active',
+                          'auto_cookie_refresh_disabled'
+                      )
+                      AND datetime(COALESCE(updated_at, created_at)) >= datetime('now', '-' || ? || ' minutes')
+                    ''',
+                    (safe_cookie_id, safe_minutes),
+                )
+                row = cursor.fetchone() or (0, 0, 0, None)
+                failure_count = int(row[0] or 0)
+                slider_failed_count = int(row[1] or 0)
+                risk_protected_count = int(row[2] or 0)
+
+                result.update({
+                    'failure_count': failure_count,
+                    'slider_failed_count': slider_failed_count,
+                    'risk_protected_count': risk_protected_count,
+                    'latest_failed_at': row[3],
+                })
+
+                if risk_protected_count > 0:
+                    result.update({
+                        'should_throttle': True,
+                        'reason': '账号已进入风控保护状态，请先在闲鱼客户端完成处理后再手动启用',
+                    })
+                    return result
+
+                if failure_count >= safe_threshold:
+                    result.update({
+                        'should_throttle': True,
+                        'reason': f'近{safe_minutes}分钟已有{failure_count}次风控恢复失败，暂停自动重试',
+                    })
+                    return result
+
+                return result
+        except Exception as e:
+            logger.error(f"判断账号风控熔断状态失败: {e}")
+            return result
 
     def get_slider_verification_session_stats(self, cookie_ids: Optional[List[str]] = None, range_key: str = 'all') -> Dict[str, Any]:
         """获取滑块验证会话级统计数据。"""

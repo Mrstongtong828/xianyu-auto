@@ -20,6 +20,7 @@ import io
 import asyncio
 import queue
 from collections import defaultdict
+from threading import Lock
 
 import cookie_manager
 from db_manager import db_manager
@@ -71,6 +72,8 @@ security = HTTPBearer(auto_error=False)
 # 扫码登录检查锁 - 防止并发处理同一个session
 qr_check_locks = defaultdict(lambda: asyncio.Lock())
 qr_check_processed = {}  # 记录已处理的session: {session_id: {'processed': bool, 'timestamp': float}}
+risk_health_alert_tracker = {}
+risk_health_alert_lock = Lock()
 
 # ========================= 防暴力破解配置 =========================
 # IP 登录失败记录: {ip: {'attempts': int, 'first_attempt': float, 'last_attempt': float, 'blocked_until': float}}
@@ -3465,6 +3468,106 @@ def _empty_slider_session_stats() -> Dict[str, Any]:
         'selected_range': 'all',
         'range_label': '所有',
     }
+
+
+def _empty_risk_health_summary(lookback_minutes: int = 1440) -> Dict[str, Any]:
+    return {
+        'health_level': 'normal',
+        'health_label': '运行平稳',
+        'lookback_minutes': lookback_minutes,
+        'failed_count': 0,
+        'processing_count': 0,
+        'slider_failed_count': 0,
+        'cookie_refresh_failed_count': 0,
+        'risk_protected_count': 0,
+        'accounts_with_failures': 0,
+        'accounts_with_processing': 0,
+        'disabled_accounts': 0,
+        'risk_protected_accounts': 0,
+        'top_failed_accounts': [],
+        'latest_failed_at': None,
+        'latest_processing_at': None,
+        'recommendations': ['暂无近期风控异常，继续保持当前运行节奏'],
+    }
+
+
+def _get_int_system_setting(key: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(db_manager.get_system_setting(key) or default)
+        return max(minimum, min(value, maximum))
+    except Exception:
+        return default
+
+
+def _get_bool_system_setting(key: str, default: bool = False) -> bool:
+    value = db_manager.get_system_setting(key)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _format_risk_alert_account_lines(accounts: List[Dict[str, Any]], max_items: int = 3) -> str:
+    if not accounts:
+        return '暂无集中失败账号'
+    lines = []
+    for item in accounts[:max_items]:
+        cookie_id = item.get('cookie_id') or '-'
+        failed_count = int(item.get('failed_count') or 0)
+        slider_failed_count = int(item.get('slider_failed_count') or 0)
+        lines.append(f"- {cookie_id}: 失败 {failed_count} 次，滑块失败 {slider_failed_count} 次")
+    return '\n'.join(lines)
+
+
+def _send_risk_health_alert_if_needed(user_id: int, cookie_ids: List[str], summary: Dict[str, Any]) -> None:
+    if summary.get('health_level') not in {'warning', 'critical'}:
+        return
+    if not _get_bool_system_setting('risk_health_alert_enabled', True):
+        return
+
+    cooldown_minutes = _get_int_system_setting('risk_health_alert_cooldown_minutes', 60, 5, 24 * 60)
+    now = time.time()
+    alert_key = f"{user_id}:{summary.get('health_level')}"
+    with risk_health_alert_lock:
+        last_sent_at = risk_health_alert_tracker.get(alert_key, 0)
+        if now - last_sent_at < cooldown_minutes * 60:
+            return
+        risk_health_alert_tracker[alert_key] = now
+
+    target_account_id = None
+    for cookie_id in cookie_ids:
+        try:
+            if db_manager.get_account_notifications(cookie_id):
+                target_account_id = cookie_id
+                break
+        except Exception:
+            continue
+
+    if not target_account_id:
+        logger.warning(f"用户 {user_id} 未配置账号通知渠道，跳过风控健康告警")
+        return
+
+    recommendations = summary.get('recommendations') or []
+    recommendation_text = '\n'.join([f"- {item}" for item in recommendations[:4]]) or '- 请查看风控日志'
+    message = (
+        f"⚠️ 风控健康告警：{summary.get('health_label') or '需要关注'}\n\n"
+        f"统计窗口: 近 {int(summary.get('lookback_minutes') or 0) // 60 or 1} 小时\n"
+        f"失败事件: {summary.get('failed_count', 0)}\n"
+        f"处理中: {summary.get('processing_count', 0)}\n"
+        f"保护账号: {summary.get('risk_protected_accounts', 0)}\n\n"
+        f"高风险账号:\n{_format_risk_alert_account_lines(summary.get('top_failed_accounts') or [])}\n\n"
+        f"建议:\n{recommendation_text}"
+    )
+
+    sent = dispatch_account_notifications_sync(
+        target_account_id,
+        message,
+        title='风控健康告警',
+        notification_type='risk_health_alert',
+    )
+    if sent:
+        logger.warning(f"已发送风控健康告警: user_id={user_id}, level={summary.get('health_level')}, account={target_account_id}")
+    else:
+        logger.warning(f"风控健康告警发送失败: user_id={user_id}, account={target_account_id}")
 
 async def _execute_password_login(session_id: str, account_id: str, account: str, password: str, show_browser: bool, user_id: int, current_user: Dict[str, Any]):
     """后台执行账号密码登录任务"""
@@ -8222,6 +8325,121 @@ async def get_slider_verification_stats(
             'success': False,
             'message': f'获取滑块验证统计失败: {str(e)}',
             'data': _empty_slider_session_stats(),
+        }
+
+
+@app.get("/admin/risk-health-summary")
+async def get_risk_health_summary(
+    lookback_hours: int = 24,
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """获取风控健康摘要，用于快速发现连续失败和账号保护状态。"""
+    try:
+        user_id = admin_user['user_id']
+        safe_hours = max(1, min(int(lookback_hours or 24), 168))
+        lookback_minutes = safe_hours * 60
+        user_cookie_ids = sorted(db_manager.get_all_cookies(user_id).keys())
+
+        summary = _empty_risk_health_summary(lookback_minutes)
+        if not user_cookie_ids:
+            summary.update({
+                'health_level': 'normal',
+                'health_label': '暂无账号',
+                'recommendations': ['当前没有可统计的账号，请先添加账号后再查看风控健康状态'],
+            })
+            return {'success': True, 'data': summary}
+
+        recent_summary = db_manager.get_recent_risk_control_failure_summary(
+            user_cookie_ids,
+            lookback_minutes=lookback_minutes,
+        )
+        disabled_accounts = 0
+        risk_protected_accounts = 0
+        for cookie_id in user_cookie_ids:
+            enabled = True
+            try:
+                if cookie_manager.manager is not None:
+                    enabled = cookie_manager.manager.get_cookie_status(cookie_id)
+                else:
+                    enabled = db_manager.get_cookie_status(cookie_id)
+            except Exception:
+                enabled = True
+
+            details = db_manager.get_cookie_details(cookie_id) or {}
+            status_note = str(details.get('status_note') or '').strip()
+            status_note_lower = status_note.lower()
+            is_risk_status_note = (
+                any(keyword in status_note for keyword in ['风控', '风险', '保护', '限制'])
+                or any(keyword in status_note_lower for keyword in ['risk', 'protect', 'limit'])
+            )
+            if not enabled:
+                disabled_accounts += 1
+            if status_note and (not enabled or is_risk_status_note):
+                risk_protected_accounts += 1
+
+        failed_count = int(recent_summary.get('failed_count') or 0)
+        processing_count = int(recent_summary.get('processing_count') or 0)
+        risk_protected_count = int(recent_summary.get('risk_protected_count') or 0)
+        slider_failed_count = int(recent_summary.get('slider_failed_count') or 0)
+        cookie_refresh_failed_count = int(recent_summary.get('cookie_refresh_failed_count') or 0)
+        accounts_with_failures = int(recent_summary.get('accounts_with_failures') or 0)
+
+        health_level = 'normal'
+        health_label = '运行平稳'
+        recommendations = []
+
+        if risk_protected_accounts > 0 or risk_protected_count > 0:
+            health_level = 'critical'
+            health_label = '账号保护中'
+            recommendations.append('已有账号进入风控保护，请先到闲鱼客户端按提示完成处理，再手动启用账号')
+        elif failed_count >= 6 or accounts_with_failures >= 3:
+            health_level = 'warning'
+            health_label = '近期失败偏多'
+            recommendations.append('近段时间风控失败较多，建议暂停自动刷新一段时间并优先检查失败最多的账号')
+        elif processing_count >= 3:
+            health_level = 'attention'
+            health_label = '存在处理中积压'
+            recommendations.append('有多条风控事件仍在处理中，建议确认浏览器验证窗口或后台任务是否卡住')
+        elif failed_count > 0:
+            health_level = 'attention'
+            health_label = '存在少量失败'
+            recommendations.append('近期存在少量风控失败，请关注是否集中在同一账号或同一场景')
+
+        if slider_failed_count > 0:
+            recommendations.append('滑块失败时优先使用手动刷新或客户端处理，避免短时间多次自动重试')
+        if cookie_refresh_failed_count > 0:
+            recommendations.append('Cookie刷新失败时请检查账号密码、验证码状态和浏览器验证是否完成')
+        if disabled_accounts > 0 and risk_protected_accounts == 0:
+            recommendations.append('有账号处于禁用状态，若非风控保护可按需手动启用')
+        if not recommendations:
+            recommendations.append('暂无近期风控异常，继续保持当前运行节奏')
+
+        summary.update(recent_summary)
+        summary.update({
+            'health_level': health_level,
+            'health_label': health_label,
+            'disabled_accounts': disabled_accounts,
+            'risk_protected_accounts': risk_protected_accounts,
+            'recommendations': recommendations[:4],
+            'alert_enabled': _get_bool_system_setting('risk_health_alert_enabled', True),
+            'alert_cooldown_minutes': _get_int_system_setting('risk_health_alert_cooldown_minutes', 60, 5, 24 * 60),
+            'auth_throttle_window_minutes': _get_int_system_setting('risk_auth_throttle_window_minutes', 30, 5, 24 * 60),
+            'auth_throttle_failure_threshold': _get_int_system_setting('risk_auth_throttle_failure_threshold', 3, 1, 20),
+        })
+        _send_risk_health_alert_if_needed(user_id, user_cookie_ids, summary)
+
+        log_with_user(
+            'info',
+            f"获取风控健康摘要成功: level={health_level}, failed={failed_count}, processing={processing_count}, protected={risk_protected_accounts}",
+            admin_user,
+        )
+        return {'success': True, 'data': summary}
+    except Exception as e:
+        log_with_user('error', f"获取风控健康摘要失败: {str(e)}", admin_user)
+        return {
+            'success': False,
+            'message': f'获取风控健康摘要失败: {str(e)}',
+            'data': _empty_risk_health_summary(),
         }
 
 

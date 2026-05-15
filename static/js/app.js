@@ -14015,6 +14015,7 @@ async function loadSystemSettings() {
             // 显示/隐藏管理员专用设置（仅管理员可见）
             const apiSecuritySettings = document.getElementById('api-security-settings');
             const loginInfoSettings = document.getElementById('login-info-settings');
+            const riskProtectionSettings = document.getElementById('risk-protection-settings');
             const outgoingConfigs = document.getElementById('outgoing-configs');
             const backupManagement = document.getElementById('backup-management');
             const systemRestartBtn = document.getElementById('system-restart-btn');
@@ -14025,6 +14026,9 @@ async function loadSystemSettings() {
             }
             if (loginInfoSettings) {
                 loginInfoSettings.style.display = isAdmin ? 'flex' : 'none';
+            }
+            if (riskProtectionSettings) {
+                riskProtectionSettings.style.display = isAdmin ? 'flex' : 'none';
             }
             if (outgoingConfigs) {
                 outgoingConfigs.style.display = isAdmin ? 'block' : 'none';
@@ -14045,6 +14049,7 @@ async function loadSystemSettings() {
                 await loadAPISecuritySettings();
                 await loadRegistrationSettings();
                 await loadLoginInfoSettings();
+                await loadRiskProtectionSettings();
                 await loadOutgoingConfigs();
             }
         }
@@ -14052,13 +14057,113 @@ async function loadSystemSettings() {
         console.error('获取用户信息失败:', error);
         // 出错时隐藏管理员功能
         const loginInfoSettings = document.getElementById('login-info-settings');
+        const riskProtectionSettings = document.getElementById('risk-protection-settings');
         const dashboardHotUpdateGroup = document.getElementById('dashboardHotUpdateGroup');
         if (loginInfoSettings) {
             loginInfoSettings.style.display = 'none';
         }
+        if (riskProtectionSettings) {
+            riskProtectionSettings.style.display = 'none';
+        }
         if (dashboardHotUpdateGroup) {
             dashboardHotUpdateGroup.style.display = 'none';
         }
+    }
+}
+
+function setNumberInputValue(inputId, value, fallback) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    const parsed = parseInt(value, 10);
+    input.value = Number.isFinite(parsed) ? parsed : fallback;
+}
+
+async function loadRiskProtectionSettings() {
+    try {
+        const response = await fetch('/system-settings', {
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('加载系统设置失败');
+        }
+
+        const settings = await response.json();
+        setNumberInputValue('riskThrottleWindowMinutes', settings.risk_auth_throttle_window_minutes, 30);
+        setNumberInputValue('riskThrottleFailureThreshold', settings.risk_auth_throttle_failure_threshold, 3);
+        setNumberInputValue('riskHealthAlertCooldownMinutes', settings.risk_health_alert_cooldown_minutes, 60);
+
+        const alertEnabled = document.getElementById('riskHealthAlertEnabled');
+        if (alertEnabled) {
+            alertEnabled.checked = settings.risk_health_alert_enabled === undefined
+                ? true
+                : settings.risk_health_alert_enabled === 'true';
+        }
+    } catch (error) {
+        console.error('加载风控保护设置失败:', error);
+        showToast('加载风控保护设置失败', 'danger');
+    }
+}
+
+function getClampedNumberInput(inputId, fallback, min, max) {
+    const input = document.getElementById(inputId);
+    const parsed = parseInt(input?.value, 10);
+    if (!Number.isFinite(parsed)) {
+        return fallback;
+    }
+    return Math.max(min, Math.min(parsed, max));
+}
+
+async function updateRiskProtectionSettings() {
+    const configs = [
+        {
+            key: 'risk_auth_throttle_window_minutes',
+            value: String(getClampedNumberInput('riskThrottleWindowMinutes', 30, 5, 1440)),
+            description: '自动账密恢复熔断统计窗口（分钟）'
+        },
+        {
+            key: 'risk_auth_throttle_failure_threshold',
+            value: String(getClampedNumberInput('riskThrottleFailureThreshold', 3, 1, 20)),
+            description: '自动账密恢复熔断失败次数阈值'
+        },
+        {
+            key: 'risk_health_alert_cooldown_minutes',
+            value: String(getClampedNumberInput('riskHealthAlertCooldownMinutes', 60, 5, 1440)),
+            description: '风控健康摘要告警冷却时间（分钟）'
+        },
+        {
+            key: 'risk_health_alert_enabled',
+            value: document.getElementById('riskHealthAlertEnabled')?.checked ? 'true' : 'false',
+            description: '是否开启风控健康摘要告警'
+        }
+    ];
+
+    try {
+        for (const config of configs) {
+            const response = await fetch(`/system-settings/${config.key}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${authToken}`
+                },
+                body: JSON.stringify({
+                    value: config.value,
+                    description: config.description
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`保存 ${config.key} 失败`);
+            }
+        }
+
+        showToast('风控保护设置已保存', 'success');
+        await loadRiskProtectionSettings();
+    } catch (error) {
+        console.error('保存风控保护设置失败:', error);
+        showToast(`保存风控保护设置失败: ${error.message}`, 'danger');
     }
 }
 
@@ -17064,6 +17169,197 @@ let currentRiskLogStatus = '';
 let currentRiskLogOffset = 0;
 const riskLogLimit = 100;
 let currentRiskSliderStatsRequestId = 0;
+let currentRiskHealthRequestId = 0;
+
+function getRiskHealthMeta(level = 'normal') {
+    const normalizedLevel = String(level || 'normal').trim().toLowerCase();
+    const metaMap = {
+        normal: {
+            className: 'is-normal',
+            icon: 'bi-shield-check',
+            fallbackTitle: '运行平稳'
+        },
+        attention: {
+            className: 'is-attention',
+            icon: 'bi-exclamation-circle',
+            fallbackTitle: '需要关注'
+        },
+        warning: {
+            className: 'is-warning',
+            icon: 'bi-shield-exclamation',
+            fallbackTitle: '近期失败偏多'
+        },
+        critical: {
+            className: 'is-critical',
+            icon: 'bi-shield-fill-exclamation',
+            fallbackTitle: '账号保护中'
+        }
+    };
+
+    return metaMap[normalizedLevel] || metaMap.normal;
+}
+
+function formatRiskLookback(minutes = 1440) {
+    const value = Number(minutes);
+    if (!Number.isFinite(value) || value <= 0) {
+        return '近 24 小时';
+    }
+    if (value >= 1440 && value % 1440 === 0) {
+        return `近 ${value / 1440} 天`;
+    }
+    if (value >= 60 && value % 60 === 0) {
+        return `近 ${value / 60} 小时`;
+    }
+    return `近 ${Math.round(value)} 分钟`;
+}
+
+function setRiskHealthSummaryLoading() {
+    const card = document.getElementById('riskHealthSummaryCard');
+    const title = document.getElementById('riskHealthTitle');
+    const subtitle = document.getElementById('riskHealthSubtitle');
+    const failedCount = document.getElementById('riskHealthFailedCount');
+    const processingCount = document.getElementById('riskHealthProcessingCount');
+    const protectedCount = document.getElementById('riskHealthProtectedCount');
+    const recommendations = document.getElementById('riskHealthRecommendations');
+    const hotspots = document.getElementById('riskHealthHotspots');
+
+    if (card) {
+        card.classList.remove('is-normal', 'is-attention', 'is-warning', 'is-critical');
+        card.classList.add('is-loading');
+    }
+    if (title) title.textContent = '正在检查风控状态...';
+    if (subtitle) subtitle.textContent = '汇总近 24 小时失败、处理中和账号保护情况';
+    if (failedCount) failedCount.textContent = '--';
+    if (processingCount) processingCount.textContent = '--';
+    if (protectedCount) protectedCount.textContent = '--';
+    if (recommendations) recommendations.innerHTML = '<span class="text-muted small">正在生成建议...</span>';
+    if (hotspots) {
+        hotspots.style.display = 'none';
+        hotspots.innerHTML = '';
+    }
+}
+
+function renderRiskHealthSummary(summary = {}) {
+    const card = document.getElementById('riskHealthSummaryCard');
+    const icon = document.getElementById('riskHealthIcon');
+    const title = document.getElementById('riskHealthTitle');
+    const subtitle = document.getElementById('riskHealthSubtitle');
+    const failedCount = document.getElementById('riskHealthFailedCount');
+    const processingCount = document.getElementById('riskHealthProcessingCount');
+    const protectedCount = document.getElementById('riskHealthProtectedCount');
+    const recommendations = document.getElementById('riskHealthRecommendations');
+    const hotspots = document.getElementById('riskHealthHotspots');
+
+    const meta = getRiskHealthMeta(summary.health_level);
+    const lookbackText = formatRiskLookback(summary.lookback_minutes || 1440);
+    const failed = Number(summary.failed_count || 0);
+    const processing = Number(summary.processing_count || 0);
+    const protectedAccounts = Number(summary.risk_protected_accounts || summary.risk_protected_count || 0);
+    const accountsWithFailures = Number(summary.accounts_with_failures || 0);
+    const sliderFailures = Number(summary.slider_failed_count || 0);
+    const latestFailure = formatBeijingDateTime(summary.latest_failed_at);
+
+    if (card) {
+        card.classList.remove('is-loading', 'is-normal', 'is-attention', 'is-warning', 'is-critical');
+        card.classList.add(meta.className);
+    }
+    if (icon) {
+        icon.innerHTML = `<i class="bi ${meta.icon}"></i>`;
+    }
+    if (title) {
+        title.textContent = summary.health_label || meta.fallbackTitle;
+    }
+    if (subtitle) {
+        const accountText = accountsWithFailures > 0 ? `，涉及 ${accountsWithFailures} 个账号` : '';
+        const sliderText = sliderFailures > 0 ? `，滑块失败 ${sliderFailures} 次` : '';
+        const latestText = latestFailure !== '--' ? `，最近失败 ${latestFailure}` : '';
+        subtitle.textContent = `${lookbackText}：失败 ${failed} 次、处理中 ${processing} 次${accountText}${sliderText}${latestText}`;
+    }
+    if (failedCount) failedCount.textContent = String(failed);
+    if (processingCount) processingCount.textContent = String(processing);
+    if (protectedCount) protectedCount.textContent = String(protectedAccounts);
+
+    if (recommendations) {
+        const items = Array.isArray(summary.recommendations) && summary.recommendations.length
+            ? summary.recommendations
+            : ['暂无近期风控异常，继续保持当前运行节奏'];
+        recommendations.innerHTML = items.map((item) => `
+            <span class="risk-health-recommendation">
+                <i class="bi bi-check2-circle"></i>
+                ${escapeHtml(item)}
+            </span>
+        `).join('');
+    }
+
+    if (hotspots) {
+        const accounts = Array.isArray(summary.top_failed_accounts) ? summary.top_failed_accounts : [];
+        if (accounts.length) {
+            hotspots.style.display = 'grid';
+            hotspots.innerHTML = accounts.slice(0, 3).map((account) => {
+                const cookieId = account.cookie_id || '-';
+                const failedCount = Number(account.failed_count || 0);
+                const sliderFailedCount = Number(account.slider_failed_count || 0);
+                const latestText = formatBeijingDateTime(account.latest_failed_at);
+                const actionText = protectedAccounts > 0
+                    ? '建议先去闲鱼客户端处理后再启用'
+                    : '建议暂停自动刷新并优先手动确认状态';
+                return `
+                    <div class="risk-health-hotspot">
+                        <div class="risk-health-hotspot-title">
+                            <i class="bi bi-person-exclamation"></i>
+                            <strong>${escapeHtml(cookieId)}</strong>
+                        </div>
+                        <div class="risk-health-hotspot-meta">
+                            失败 ${failedCount} 次，滑块失败 ${sliderFailedCount} 次，最近 ${escapeHtml(latestText)}
+                        </div>
+                        <div class="risk-health-hotspot-action">${escapeHtml(actionText)}</div>
+                    </div>
+                `;
+            }).join('');
+        } else {
+            hotspots.style.display = 'none';
+            hotspots.innerHTML = '';
+        }
+    }
+}
+
+async function loadRiskHealthSummary() {
+    const token = localStorage.getItem('auth_token');
+    const requestId = ++currentRiskHealthRequestId;
+
+    setRiskHealthSummaryLoading();
+
+    try {
+        const response = await fetch('/admin/risk-health-summary?lookback_hours=24', {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+        const data = await response.json();
+        if (requestId !== currentRiskHealthRequestId) {
+            return;
+        }
+        if (response.ok && data.success) {
+            renderRiskHealthSummary(data.data || {});
+            return;
+        }
+        renderRiskHealthSummary({
+            health_level: 'attention',
+            health_label: '摘要加载失败',
+            recommendations: [data.message || '无法获取风控健康摘要，请稍后重试']
+        });
+    } catch (error) {
+        console.error('加载风控健康摘要失败:', error);
+        if (requestId !== currentRiskHealthRequestId) {
+            return;
+        }
+        renderRiskHealthSummary({
+            health_level: 'attention',
+            health_label: '摘要加载失败',
+            recommendations: ['无法获取风控健康摘要，请检查服务是否正常运行']
+        });
+    }
+}
 
 function getRiskSliderStatsRange() {
     const activeButton = document.querySelector('#riskSliderRangeFilter .risk-slider-range-btn.is-active');
@@ -17346,6 +17642,7 @@ async function loadRiskControlLogs(offset = 0) {
     const limit = filters.limit;
     currentRiskLogOffset = offset;
 
+    loadRiskHealthSummary();
     loadRiskControlSliderStats(cookieId);
 
     const loadingDiv = document.getElementById('loadingRiskLogs');

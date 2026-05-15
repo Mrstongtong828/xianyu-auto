@@ -169,6 +169,174 @@
   position: relative;
 }
 
+.risk-health-banner {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 1rem;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background:
+    radial-gradient(circle at top left, rgba(34, 197, 94, 0.14), transparent 34%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow: 0 18px 36px -30px rgba(15, 23, 42, 0.34);
+  padding: 1rem;
+}
+
+.risk-health-banner::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: var(--success-color);
+}
+
+.risk-health-banner.is-attention::before {
+  background: var(--warning-color);
+}
+
+.risk-health-banner.is-warning::before,
+.risk-health-banner.is-critical::before {
+  background: var(--danger-color);
+}
+
+.risk-health-banner.is-loading {
+  opacity: 0.82;
+}
+
+.risk-health-main {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.risk-health-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  font-size: 1.22rem;
+  color: var(--success-color);
+  background: rgba(34, 197, 94, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.risk-health-banner.is-attention .risk-health-icon {
+  color: var(--warning-color);
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.risk-health-banner.is-warning .risk-health-icon,
+.risk-health-banner.is-critical .risk-health-icon {
+  color: var(--danger-color);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.risk-health-main h5 {
+  font-size: 1.03rem;
+  font-weight: 800;
+}
+
+.risk-health-main p {
+  font-size: 0.8rem;
+}
+
+.risk-health-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(82px, 1fr));
+  gap: 0.55rem;
+}
+
+.risk-health-metric {
+  min-width: 82px;
+  padding: 0.62rem 0.72rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.risk-health-metric span {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-bottom: 0.16rem;
+}
+
+.risk-health-metric strong {
+  font-size: 1.12rem;
+  color: var(--text-primary);
+}
+
+.risk-health-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.risk-health-recommendations {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.risk-health-recommendation {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.62rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.045);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.2;
+}
+
+.risk-health-recommendation i {
+  color: var(--primary-color);
+}
+
+.risk-health-hotspots {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.risk-health-hotspot {
+  padding: 0.7rem 0.8rem;
+  border-radius: 14px;
+  border: 1px solid rgba(239, 68, 68, 0.14);
+  background: rgba(254, 242, 242, 0.76);
+}
+
+.risk-health-hotspot-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+  color: var(--danger-color);
+  font-size: 0.82rem;
+}
+
+.risk-health-hotspot-meta {
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.risk-health-hotspot-action {
+  margin-top: 0.36rem;
+  color: var(--text-primary);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
 .risk-tool-card {
   position: relative;
   overflow: hidden;
@@ -672,6 +840,36 @@
   box-shadow: 0 18px 34px -30px rgba(2, 6, 23, 0.92);
 }
 
+[data-theme="dark"] .risk-health-banner {
+  background:
+    radial-gradient(circle at top left, rgba(34, 197, 94, 0.18), transparent 34%),
+    linear-gradient(135deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.96));
+  border-color: rgba(148, 163, 184, 0.16);
+}
+
+[data-theme="dark"] .risk-health-metric {
+  background: rgba(15, 23, 42, 0.52);
+  border-color: rgba(148, 163, 184, 0.16);
+}
+
+[data-theme="dark"] .risk-health-recommendation {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .risk-health-hotspot {
+  background: rgba(127, 29, 29, 0.22);
+  border-color: rgba(248, 113, 113, 0.2);
+}
+
+[data-theme="dark"] .risk-health-hotspot-meta {
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .risk-health-hotspot-action {
+  color: #fee2e2;
+}
+
 [data-theme="dark"] .risk-tool-card-icon.primary,
 [data-theme="dark"] .risk-tool-card-icon.warning {
   background: rgba(99, 102, 241, 0.22);
@@ -748,6 +946,18 @@
 }
 
 @media (max-width: 991.98px) {
+  .risk-health-banner {
+    grid-template-columns: 1fr;
+  }
+
+  .risk-health-actions {
+    justify-content: flex-start;
+  }
+
+  .risk-health-hotspots {
+    grid-template-columns: 1fr;
+  }
+
   .risk-log-table {
     min-width: 1080px;
     table-layout: auto;
@@ -795,6 +1005,10 @@
 @media (max-width: 575.98px) {
   .risk-tool-card {
     padding: 0.78rem;
+  }
+
+  .risk-health-metrics {
+    grid-template-columns: 1fr;
   }
 
   .risk-filter-grid,

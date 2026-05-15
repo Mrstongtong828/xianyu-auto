@@ -2440,6 +2440,42 @@
       </div>
 
       <div class="content-body">
+        <div class="risk-health-banner mb-3" id="riskHealthSummaryCard">
+          <div class="risk-health-main">
+            <div class="risk-health-icon" id="riskHealthIcon">
+              <i class="bi bi-shield-check"></i>
+            </div>
+            <div>
+              <div class="risk-tool-card-kicker">风控健康摘要</div>
+              <h5 class="mb-1" id="riskHealthTitle">正在检查风控状态...</h5>
+              <p class="mb-0 text-muted" id="riskHealthSubtitle">汇总近 24 小时失败、处理中和账号保护情况</p>
+            </div>
+          </div>
+          <div class="risk-health-metrics">
+            <div class="risk-health-metric">
+              <span>失败事件</span>
+              <strong id="riskHealthFailedCount">--</strong>
+            </div>
+            <div class="risk-health-metric">
+              <span>处理中</span>
+              <strong id="riskHealthProcessingCount">--</strong>
+            </div>
+            <div class="risk-health-metric">
+              <span>保护账号</span>
+              <strong id="riskHealthProtectedCount">--</strong>
+            </div>
+          </div>
+          <div class="risk-health-actions">
+            <button class="btn btn-sm btn-outline-primary" onclick="loadRiskHealthSummary()">
+              <i class="bi bi-arrow-clockwise me-1"></i>刷新摘要
+            </button>
+          </div>
+          <div class="risk-health-recommendations" id="riskHealthRecommendations">
+            <span class="text-muted small">正在生成建议...</span>
+          </div>
+          <div class="risk-health-hotspots" id="riskHealthHotspots" style="display: none;"></div>
+        </div>
+
         <!-- 风控日志控制面板 -->
         <div class="risk-log-toolbar-wrap mb-4">
           <div class="row g-3 align-items-stretch risk-log-toolbar">
@@ -2994,6 +3030,57 @@
                       <i class="bi bi-check-circle me-1"></i>保存设置
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 风控保护设置 (仅管理员可见) -->
+        <div id="risk-protection-settings" class="row mt-4" style="display: none;">
+          <div class="col-12">
+            <div class="card">
+              <div class="card-header">
+                <i class="bi bi-shield-exclamation me-2"></i>风控保护设置
+                <span class="badge bg-warning ms-2">管理员专用</span>
+              </div>
+              <div class="card-body">
+                <div class="alert alert-info mb-3">
+                  <i class="bi bi-info-circle me-2"></i>
+                  这些设置用于减少账号在短时间连续失败后的自动重试，并在风控健康状态恶化时通过已配置的通知渠道提醒管理员。
+                </div>
+                <div class="row g-3">
+                  <div class="col-md-3">
+                    <label class="form-label" for="riskThrottleWindowMinutes">熔断统计窗口（分钟）</label>
+                    <input type="number" class="form-control" id="riskThrottleWindowMinutes" min="5" max="1440" value="30">
+                    <div class="form-text">统计最近多久内的真实恢复失败</div>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label" for="riskThrottleFailureThreshold">失败阈值（次）</label>
+                    <input type="number" class="form-control" id="riskThrottleFailureThreshold" min="1" max="20" value="3">
+                    <div class="form-text">达到阈值后暂停自动账密恢复</div>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label" for="riskHealthAlertCooldownMinutes">告警冷却（分钟）</label>
+                    <input type="number" class="form-control" id="riskHealthAlertCooldownMinutes" min="5" max="1440" value="60">
+                    <div class="form-text">同级别告警最短发送间隔</div>
+                  </div>
+                  <div class="col-md-3 d-flex align-items-center">
+                    <div>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="riskHealthAlertEnabled" checked>
+                        <label class="form-check-label" for="riskHealthAlertEnabled">
+                          <strong>开启风控健康告警</strong>
+                        </label>
+                      </div>
+                      <div class="form-text">状态达到警告或严重时发送通知</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="mt-3">
+                  <button type="button" class="btn btn-primary" onclick="updateRiskProtectionSettings()">
+                    <i class="bi bi-check-circle me-1"></i>保存风控保护设置
+                  </button>
                 </div>
               </div>
             </div>

@@ -711,6 +711,8 @@ class XianyuLive:
         message = (error_message or "").lower()
         if any(keyword in message for keyword in ["账号密码错误", "账密错误", "用户名或密码错误", "密码错误"]):
             return "credentials", 1800
+        if any(keyword in message for keyword in ["风控恢复失败较多", "暂停自动重试", "risk_recovery_throttled"]):
+            return "risk_recovery_throttled", 1800
         if any(keyword in message for keyword in ["前置滑块", "风控", "拦截", "框体错误", "点击框体重试", "账号存在风险", "闲鱼客户端登录"]):
             return "risk_control", 900
         if any(keyword in message for keyword in ["滑块验证失败", "未找到滑块容器"]):
@@ -6886,6 +6888,50 @@ class XianyuLive:
                     event_meta=self._build_risk_event_meta(trigger_scene=trigger_scene, extra=base_event_meta),
                 )
             return False
+
+        if trigger_scene not in manual_refresh_scenes:
+            def _get_int_setting(key: str, default: int, minimum: int, maximum: int) -> int:
+                try:
+                    value = int(db_manager.get_system_setting(key) or default)
+                    return max(minimum, min(value, maximum))
+                except Exception:
+                    return default
+
+            throttle_window_minutes = _get_int_setting('risk_auth_throttle_window_minutes', 30, 5, 24 * 60)
+            throttle_failure_threshold = _get_int_setting('risk_auth_throttle_failure_threshold', 3, 1, 20)
+            throttle_state = db_manager.should_throttle_auth_recovery(
+                self.cookie_id,
+                lookback_minutes=throttle_window_minutes,
+                failure_threshold=throttle_failure_threshold,
+            )
+            if throttle_state.get('should_throttle'):
+                throttle_reason = throttle_state.get('reason') or "近期风控恢复失败较多，暂停自动重试"
+                self.last_token_refresh_status = "risk_recovery_throttled"
+                self.last_token_refresh_error_message = throttle_reason
+                XianyuLive.set_password_login_failure_backoff(
+                    self.cookie_id,
+                    "risk_recovery_throttled",
+                    max(1800, throttle_window_minutes * 60),
+                )
+                logger.warning(
+                    f"【{self.cookie_id}】触发风控恢复熔断: {throttle_reason}; "
+                    f"failures={throttle_state.get('failure_count')}, window={throttle_state.get('lookback_minutes')}min"
+                )
+                if refresh_risk_log_id:
+                    self._update_risk_log(
+                        refresh_risk_log_id,
+                        session_id=risk_session_id,
+                        trigger_scene=trigger_scene,
+                        result_code='risk_recovery_throttled',
+                        processing_status='failed',
+                        error_message=throttle_reason[:200],
+                        duration_ms=max(0, int((time.time() - risk_log_started_at) * 1000)),
+                        event_meta=self._build_risk_event_meta(
+                            trigger_scene=trigger_scene,
+                            extra={**base_event_meta, 'throttle_state': throttle_state},
+                        ),
+                    )
+                return False
 
         recovery_lock_owner = f"{self.cookie_id}:{trigger_scene or 'auto_cookie_refresh'}:{int(time.time() * 1000)}"
         recovery_lock_acquired = False
