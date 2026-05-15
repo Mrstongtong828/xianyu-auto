@@ -14047,9 +14047,6 @@ async function loadSystemSettings() {
                 await loadLoginInfoSettings();
                 await loadOutgoingConfigs();
             }
-
-            // 加载飞书聊一聊配置（所有用户）
-            await loadFeishuBargainConfig();
         }
     } catch (error) {
         console.error('获取用户信息失败:', error);
