@@ -526,8 +526,20 @@ async def main():
     print("CookieManager 创建完成")
 
     # 1) 从数据库加载的 Cookie 已经在 CookieManager 初始化时完成
-    # 为每个启用的 Cookie 启动任务
+    # 只启动一个账号后台，避免多账号后台同时运行导致机器卡顿
+    startup_background_started = False
     for cid, val in manager.cookies.items():
+        if startup_background_started:
+            if manager.get_cookie_status(cid):
+                manager.cookie_status[cid] = False
+                try:
+                    from db_manager import db_manager
+                    db_manager.save_cookie_status(cid, False)
+                except Exception as status_err:
+                    logger.warning(f"启动限制保存账号禁用状态失败: {cid}, {status_err}")
+            logger.info(f"后台数量限制：跳过并禁用额外账号后台: {cid}")
+            continue
+
         # 检查账号是否启用
         if not manager.get_cookie_status(cid):
             logger.info(f"跳过禁用的 Cookie: {cid}")
@@ -544,6 +556,7 @@ async def main():
             logger.info(f"正在创建异步任务: {cid}")
             task = loop.create_task(manager._run_xianyu(cid, val, user_id))
             manager.tasks[cid] = task
+            startup_background_started = True
             logger.info(f"启动数据库中的 Cookie 任务: {cid} (用户ID: {user_id})")
             logger.info(f"任务已添加到管理器，当前任务数: {len(manager.tasks)}")
         except Exception as e:

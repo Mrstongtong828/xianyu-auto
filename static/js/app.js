@@ -103,6 +103,9 @@ function showSection(sectionName) {
     case 'accounts':         // 【账号管理菜单】
         loadCookies();
         break;
+    case 'backgrounds':      // 【后台管理菜单】
+        loadBackgroundManager();
+        break;
     case 'items':           // 【商品管理菜单】
         loadItems();
         initItemsSearch(); // 确保搜索功能已初始化
@@ -4059,6 +4062,114 @@ function initAboutDiagnosticsEvents() {
 }
 
 // ================================
+// 【后台管理菜单】相关功能
+// ================================
+
+function renderBackgroundStatusBadge(account) {
+    if (account.running) {
+        return '<span class="badge bg-success"><i class="bi bi-play-fill me-1"></i>运行中</span>';
+    }
+    if (account.enabled) {
+        return '<span class="badge bg-warning text-dark"><i class="bi bi-pause-fill me-1"></i>已启用未运行</span>';
+    }
+    return '<span class="badge bg-secondary"><i class="bi bi-stop-fill me-1"></i>已停止</span>';
+}
+
+function renderBackgroundConnection(account) {
+    const runtime = account.runtime_status || {};
+    if (!account.running) {
+        return '<span class="text-muted">未运行</span>';
+    }
+
+    const ready = runtime.ws_ready || runtime.message_stream_ready;
+    const state = runtime.connection_state || 'unknown';
+    const badge = ready ? 'bg-success' : 'bg-info';
+    return `<span class="badge ${badge}">${escapeHtml(state)}</span>`;
+}
+
+async function loadBackgroundManager() {
+    const tbody = document.getElementById('backgroundAccountsTableBody');
+    if (!tbody) return;
+
+    try {
+        const data = await fetchJSON(`${apiBase}/backgrounds`);
+        const accounts = data.accounts || [];
+        document.getElementById('backgroundActiveAccount').textContent = data.active_cookie_id || '未启动';
+        document.getElementById('backgroundRunningCount').textContent = `${data.running_count || 0} / ${data.max_running || 1}`;
+        document.getElementById('backgroundLimit').textContent = `最多 ${data.max_running || 1} 个后台`;
+
+        if (accounts.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">暂无账号</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = accounts.map(account => {
+            const remark = account.remark || account.username || '';
+            const actionButton = account.running
+                ? '<button class="btn btn-sm btn-outline-secondary" disabled><i class="bi bi-check2-circle me-1"></i>当前后台</button>'
+                : `<button class="btn btn-sm btn-primary" onclick="activateBackground('${account.id}')"><i class="bi bi-play-circle me-1"></i>设为后台</button>`;
+
+            return `
+                <tr>
+                    <td><strong class="text-primary">${escapeHtml(account.id)}</strong></td>
+                    <td>${remark ? escapeHtml(remark) : '<span class="text-muted">-</span>'}</td>
+                    <td>${renderBackgroundStatusBadge(account)}</td>
+                    <td>${renderBackgroundConnection(account)}</td>
+                    <td class="text-end">${actionButton}</td>
+                </tr>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error('加载后台管理失败:', error);
+        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">加载失败：${escapeHtml(error.message || '未知错误')}</td></tr>`;
+    }
+}
+
+async function activateBackground(accountId) {
+    if (!accountId) return;
+
+    try {
+        toggleLoading(true);
+        const result = await fetchJSON(`${apiBase}/backgrounds/${encodeURIComponent(accountId)}/activate`, {
+            method: 'POST'
+        });
+        showToast(result.message || `已启动账号 "${accountId}" 后台`, 'success');
+        await loadBackgroundManager();
+        if (document.getElementById('accounts-section')?.classList.contains('active')) {
+            await loadCookies();
+        }
+    } catch (error) {
+        console.error('启动后台失败:', error);
+        showToast(`启动后台失败: ${error.message || '未知错误'}`, 'danger');
+    } finally {
+        toggleLoading(false);
+    }
+}
+
+async function stopAllBackgrounds() {
+    if (!confirm('确定要停止全部账号后台吗？停止后将不会自动接收消息，直到重新选择一个后台账号。')) {
+        return;
+    }
+
+    try {
+        toggleLoading(true);
+        const result = await fetchJSON(`${apiBase}/backgrounds/stop-all`, {
+            method: 'POST'
+        });
+        showToast(result.message || '已停止全部账号后台', 'success');
+        await loadBackgroundManager();
+        if (document.getElementById('accounts-section')?.classList.contains('active')) {
+            await loadCookies();
+        }
+    } catch (error) {
+        console.error('停止后台失败:', error);
+        showToast(`停止后台失败: ${error.message || '未知错误'}`, 'danger');
+    } finally {
+        toggleLoading(false);
+    }
+}
+
+// ================================
 // 【账号管理菜单】相关功能
 // ================================
 
@@ -4161,6 +4272,8 @@ async function loadCookies() {
         
         // 自动好评状态（默认关闭）
         const autoComment = cookie.auto_comment === undefined ? false : cookie.auto_comment;
+        const autoCookieRefresh = cookie.auto_cookie_refresh === undefined ? true : cookie.auto_cookie_refresh;
+        const credentialTitle = cookie.username && cookie.has_password ? `已配置账密: ${cookie.username}` : '配置账密';
 
         tr.innerHTML = `
         <td class="align-middle">
@@ -4254,6 +4367,12 @@ async function loadCookies() {
             </button>
             <button class="btn btn-sm btn-outline-info" onclick="openPolishScheduleModal('${cookie.id}')" title="定时擦亮" ${!isEnabled ? 'disabled' : ''}>
                 <i class="bi bi-clock"></i>
+            </button>
+            <button class="btn btn-sm ${cookie.username && cookie.has_password ? 'btn-outline-success' : 'btn-outline-info'}" onclick="openCredentialConfigForAccount('${cookie.id}')" title="${credentialTitle}">
+                <i class="bi bi-person-gear"></i>
+            </button>
+            <button class="btn btn-sm ${autoCookieRefresh ? 'btn-outline-success' : 'btn-outline-secondary'}" onclick="toggleAutoCookieRefresh('${cookie.id}', ${autoCookieRefresh ? 'false' : 'true'})" title="${autoCookieRefresh ? '关闭自动刷新 Cookie' : '开启自动刷新 Cookie'}">
+                <i class="bi bi-${autoCookieRefresh ? 'arrow-repeat' : 'pause-circle'}"></i>
             </button>
 
             <button class="btn btn-sm btn-outline-danger" onclick="delCookie('${cookie.id}')" title="删除账号">
@@ -4748,6 +4867,9 @@ async function toggleAccountStatus(accountId, enabled) {
 
         // 刷新自动回复页面的账号列表
         refreshAccountList();
+        if (document.getElementById('backgrounds-section')?.classList.contains('active')) {
+            await loadBackgroundManager();
+        }
         if (dashboardData.accounts.length) {
             await refreshDashboardRuntimeSnapshots();
         }
@@ -10188,12 +10310,91 @@ function getItemDetailText(itemDetail) {
     }
 }
 
+function normalizeItemPurchaseUrl(rawUrl, itemId = '') {
+    const fallbackUrl = itemId ? `https://www.goofish.com/item?id=${encodeURIComponent(itemId)}` : '';
+    if (!rawUrl || typeof rawUrl !== 'string') return fallbackUrl;
+
+    let url = rawUrl.trim();
+    if (!url) return fallbackUrl;
+
+    if (/^fleamarket:\/\//i.test(url)) {
+        url = url.replace(/^fleamarket:\/\//i, 'https://www.goofish.com/');
+    } else if (url.startsWith('//')) {
+        url = `https:${url}`;
+    } else if (/^http:\/\//i.test(url)) {
+        url = url.replace(/^http:\/\//i, 'https://');
+    }
+
+    try {
+        const parsedUrl = new URL(url);
+        const hostname = parsedUrl.hostname.toLowerCase();
+        const isAllowedHost = hostname.endsWith('goofish.com') ||
+            hostname.endsWith('idlefish.com') ||
+            hostname.endsWith('taobao.com');
+        return isAllowedHost ? parsedUrl.href : fallbackUrl;
+    } catch (e) {
+        return fallbackUrl;
+    }
+}
+
+function getItemPurchaseUrl(item) {
+    if (!item) return '';
+
+    const itemId = String(item.item_id || item.id || '').trim();
+    const candidates = [
+        item.item_url,
+        item.url,
+        item.detail_url
+    ];
+
+    if (item.item_detail_parsed && typeof item.item_detail_parsed === 'object') {
+        candidates.push(
+            item.item_detail_parsed.detail_url,
+            item.item_detail_parsed.detailUrl,
+            item.item_detail_parsed.item_url,
+            item.item_detail_parsed.url
+        );
+    }
+
+    if (item.item_detail) {
+        try {
+            const detail = JSON.parse(item.item_detail);
+            candidates.push(
+                detail.detail_url,
+                detail.detailUrl,
+                detail.item_url,
+                detail.url
+            );
+        } catch (e) {
+            // 详情不是JSON时，按商品ID生成购买链接即可。
+        }
+    }
+
+    for (const candidate of candidates) {
+        const normalizedUrl = normalizeItemPurchaseUrl(candidate, itemId);
+        if (normalizedUrl) return normalizedUrl;
+    }
+
+    return itemId ? `https://www.goofish.com/item?id=${encodeURIComponent(itemId)}` : '';
+}
+
+function getItemPurchaseUrlLabel(url) {
+    if (!url) return '';
+
+    try {
+        const parsedUrl = new URL(url);
+        return `${parsedUrl.hostname}${parsedUrl.pathname}${parsedUrl.search}`;
+    } catch (e) {
+        return url;
+    }
+}
+
 // 显示当前页的商品数据
 function displayCurrentPageItems() {
     const tbody = document.getElementById('itemsTableBody');
 
     if (!filteredItemsData || filteredItemsData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">暂无商品数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">暂无商品数据</td></tr>';
         resetItemsSelection();
         return;
     }
@@ -10229,6 +10430,14 @@ function displayCurrentPageItems() {
             '<span class="badge bg-success">已开启</span>' :
             '<span class="badge bg-secondary">已关闭</span>';
 
+        const purchaseUrl = getItemPurchaseUrl(item);
+        const purchaseUrlLabel = getItemPurchaseUrlLabel(purchaseUrl);
+        const purchaseLinkDisplay = purchaseUrl ?
+            `<a class="item-purchase-link text-truncate" href="${escapeHtml(purchaseUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(purchaseUrl)}">
+                <i class="bi bi-box-arrow-up-right me-1"></i>${escapeHtml(purchaseUrlLabel)}
+            </a>` :
+            '<span class="text-muted small">无链接</span>';
+
         return `
             <tr>
             <td>
@@ -10242,6 +10451,7 @@ function displayCurrentPageItems() {
             <td title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</td>
             <td title="${escapeHtml(getItemDetailText(item.item_detail || ''))}">${escapeHtml(itemDetailDisplay)}</td>
             <td>${escapeHtml(item.item_price || '未设置')}</td>
+            <td>${purchaseLinkDisplay}</td>
             <td>${multiSpecDisplay}</td>
             <td>${multiQuantityDeliveryDisplay}</td>
             <td>${formatDateTime(item.updated_at)}</td>
@@ -11693,15 +11903,11 @@ function toggleManualInput() {
     const manualForm = document.getElementById('manualInputForm');
     const passwordForm = document.getElementById('passwordLoginForm');
     const refreshForm = document.getElementById('refreshCookieForm');
+    const credentialForm = document.getElementById('credentialConfigForm');
     if (manualForm.style.display === 'none') {
-        // 隐藏账号密码登录表单
-        if (passwordForm) {
-            passwordForm.style.display = 'none';
-        }
-        // 隐藏刷新Cookie表单
-        if (refreshForm) {
-            refreshForm.style.display = 'none';
-        }
+        if (passwordForm) passwordForm.style.display = 'none';
+        if (refreshForm) refreshForm.style.display = 'none';
+        if (credentialForm) credentialForm.style.display = 'none';
         manualForm.style.display = 'block';
         // 清空表单
         document.getElementById('addForm').reset();
@@ -11715,15 +11921,11 @@ function togglePasswordLogin() {
     const passwordForm = document.getElementById('passwordLoginForm');
     const manualForm = document.getElementById('manualInputForm');
     const refreshForm = document.getElementById('refreshCookieForm');
+    const credentialForm = document.getElementById('credentialConfigForm');
     if (passwordForm.style.display === 'none') {
-        // 隐藏手动输入表单
-        if (manualForm) {
-            manualForm.style.display = 'none';
-        }
-        // 隐藏刷新Cookie表单
-        if (refreshForm) {
-            refreshForm.style.display = 'none';
-        }
+        if (manualForm) manualForm.style.display = 'none';
+        if (refreshForm) refreshForm.style.display = 'none';
+        if (credentialForm) credentialForm.style.display = 'none';
         passwordForm.style.display = 'block';
         // 清空表单
         document.getElementById('passwordLoginFormElement').reset();
@@ -11737,15 +11939,13 @@ function toggleRefreshCookieForm() {
     const refreshForm = document.getElementById('refreshCookieForm');
     const manualForm = document.getElementById('manualInputForm');
     const passwordForm = document.getElementById('passwordLoginForm');
+    const credentialForm = document.getElementById('credentialConfigForm');
 
     if (refreshForm.style.display === 'none') {
         // 隐藏其他表单
-        if (manualForm) {
-            manualForm.style.display = 'none';
-        }
-        if (passwordForm) {
-            passwordForm.style.display = 'none';
-        }
+        if (manualForm) manualForm.style.display = 'none';
+        if (passwordForm) passwordForm.style.display = 'none';
+        if (credentialForm) credentialForm.style.display = 'none';
         refreshForm.style.display = 'block';
         // 清空表单
         document.getElementById('refreshCookieFormElement').reset();
@@ -11755,6 +11955,238 @@ function toggleRefreshCookieForm() {
     } else {
         refreshForm.style.display = 'none';
     }
+}
+
+// 切换账密配置表单显示/隐藏
+function toggleCredentialConfigForm(selectedAccountId = '') {
+    const credentialForm = document.getElementById('credentialConfigForm');
+    const manualForm = document.getElementById('manualInputForm');
+    const passwordForm = document.getElementById('passwordLoginForm');
+    const refreshForm = document.getElementById('refreshCookieForm');
+
+    if (!credentialForm) return;
+
+    if (credentialForm.style.display === 'none' || selectedAccountId) {
+        if (manualForm) manualForm.style.display = 'none';
+        if (passwordForm) passwordForm.style.display = 'none';
+        if (refreshForm) refreshForm.style.display = 'none';
+        credentialForm.style.display = 'block';
+        document.getElementById('credentialConfigFormElement').reset();
+        document.getElementById('credentialConfigAutoRefresh').checked = true;
+        loadCredentialConfigAccountList(selectedAccountId);
+    } else {
+        credentialForm.style.display = 'none';
+    }
+}
+
+async function loadCredentialConfigAccountList(selectedAccountId = '') {
+    const select = document.getElementById('credentialConfigAccountSelect');
+    if (!select) return;
+
+    select.innerHTML = '<option value="">请选择账号...</option>';
+
+    try {
+        const response = await fetch(`${apiBase}/cookies/details`, {
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        });
+        const data = await response.json();
+
+        if (data && data.length > 0) {
+            data.forEach(cookie => {
+                const option = document.createElement('option');
+                option.value = cookie.id;
+                const hasCredentials = cookie.username && cookie.has_password ? '已配置账密' : '未配置账密';
+                const autoRefreshText = (cookie.auto_cookie_refresh === undefined || cookie.auto_cookie_refresh) ? '自动刷新开' : '自动刷新关';
+                option.textContent = `${cookie.id} (${hasCredentials} / ${autoRefreshText})`;
+                option.dataset.username = cookie.username || '';
+                option.dataset.showBrowser = cookie.show_browser ? 'true' : 'false';
+                option.dataset.autoRefresh = cookie.auto_cookie_refresh === undefined || cookie.auto_cookie_refresh ? 'true' : 'false';
+                select.appendChild(option);
+            });
+        }
+
+        if (selectedAccountId) {
+            select.value = selectedAccountId;
+            fillCredentialConfigFromSelectedAccount();
+        }
+    } catch (error) {
+        console.error('加载账密配置账号列表失败:', error);
+        showToast('加载账密配置账号列表失败', 'danger');
+    }
+}
+
+function fillCredentialConfigFromSelectedAccount() {
+    const select = document.getElementById('credentialConfigAccountSelect');
+    if (!select) return;
+    const selectedOption = select.options[select.selectedIndex];
+    document.getElementById('credentialConfigUsername').value = selectedOption?.dataset.username || '';
+    document.getElementById('credentialConfigPassword').value = '';
+    document.getElementById('credentialConfigShowBrowser').checked = selectedOption?.dataset.showBrowser === 'true';
+    document.getElementById('credentialConfigAutoRefresh').checked = selectedOption?.dataset.autoRefresh !== 'false';
+}
+
+function openCredentialConfigForAccount(accountId) {
+    toggleCredentialConfigForm(accountId);
+    document.getElementById('credentialConfigForm')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function openCredentialConfigFromRefresh() {
+    const select = document.getElementById('refreshCookieAccountSelect');
+    const selectedAccountId = select?.value || '';
+    toggleCredentialConfigForm(selectedAccountId);
+}
+
+async function saveCredentialConfig(event) {
+    event.preventDefault();
+
+    const accountId = document.getElementById('credentialConfigAccountSelect').value;
+    const username = document.getElementById('credentialConfigUsername').value.trim();
+    const password = document.getElementById('credentialConfigPassword').value.trim();
+    const showBrowser = document.getElementById('credentialConfigShowBrowser').checked;
+    const autoRefresh = document.getElementById('credentialConfigAutoRefresh').checked;
+
+    if (!accountId || !username || !password) {
+        showToast('请选择账号并填写完整账密', 'warning');
+        return;
+    }
+
+    try {
+        toggleLoading(true);
+
+        await fetchJSON(`${apiBase}/cookie/${encodeURIComponent(accountId)}/account-info`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: username,
+                password: password,
+                show_browser: showBrowser,
+                auto_cookie_refresh: autoRefresh
+            })
+        });
+
+        await refreshCredentialViews(accountId, {
+            username,
+            hasPassword: true,
+            showBrowser,
+            autoCookieRefresh: autoRefresh
+        });
+
+        showToast(`账号 "${accountId}" 账密配置已保存`, 'success');
+    } catch (error) {
+        console.error('保存账密配置失败:', error);
+        showToast(`保存账密配置失败: ${error.message || '未知错误'}`, 'danger');
+    } finally {
+        toggleLoading(false);
+    }
+}
+
+function updateCredentialAccountOption(option, {
+    username = '',
+    hasPassword = false,
+    showBrowser = false,
+    autoCookieRefresh = true
+} = {}) {
+    if (!option) return;
+    const accountId = option.value;
+    const hasCredentials = Boolean(username) && Boolean(hasPassword);
+    option.dataset.username = username || '';
+    option.dataset.hasCredentials = hasCredentials ? 'true' : 'false';
+    option.dataset.showBrowser = showBrowser ? 'true' : 'false';
+    option.dataset.autoRefresh = autoCookieRefresh ? 'true' : 'false';
+
+    if (option.parentElement?.id === 'credentialConfigAccountSelect') {
+        const credentialText = hasCredentials ? '已配置账密' : '未配置账密';
+        const autoRefreshText = autoCookieRefresh ? '自动刷新开' : '自动刷新关';
+        option.textContent = `${accountId} (${credentialText} / ${autoRefreshText})`;
+    } else if (option.parentElement?.id === 'refreshCookieAccountSelect') {
+        const credentialText = hasCredentials ? '(已配置账密)' : '(未配置账密)';
+        option.textContent = `${accountId} ${credentialText}`;
+    }
+}
+
+async function refreshCredentialViews(accountId, fallback = null) {
+    const normalizedId = String(accountId || '').trim();
+    if (!normalizedId) return;
+
+    let latestDetails = null;
+    try {
+        latestDetails = await fetchJSONSilent(`${apiBase}/cookie/${encodeURIComponent(normalizedId)}/details?include_secrets=true`);
+    } catch (error) {
+        console.warn('刷新账密视图时获取账号详情失败，使用前端回填值:', error);
+    }
+
+    const resolved = {
+        username: latestDetails?.username ?? fallback?.username ?? '',
+        hasPassword: latestDetails ? Boolean(latestDetails.password) : Boolean(fallback?.hasPassword),
+        showBrowser: latestDetails?.show_browser ?? fallback?.showBrowser ?? false,
+        autoCookieRefresh: latestDetails?.auto_cookie_refresh ?? fallback?.autoCookieRefresh ?? true
+    };
+
+    const credentialSelect = document.getElementById('credentialConfigAccountSelect');
+    const refreshSelect = document.getElementById('refreshCookieAccountSelect');
+    const credentialOption = credentialSelect?.querySelector(`option[value="${CSS.escape(normalizedId)}"]`);
+    const refreshOption = refreshSelect?.querySelector(`option[value="${CSS.escape(normalizedId)}"]`);
+
+    updateCredentialAccountOption(credentialOption, resolved);
+    updateCredentialAccountOption(refreshOption, resolved);
+
+    if (credentialSelect && credentialSelect.value === normalizedId) {
+        document.getElementById('credentialConfigUsername').value = resolved.username || '';
+        document.getElementById('credentialConfigPassword').value = latestDetails?.password || '';
+        document.getElementById('credentialConfigShowBrowser').checked = Boolean(resolved.showBrowser);
+        document.getElementById('credentialConfigAutoRefresh').checked = Boolean(resolved.autoCookieRefresh);
+    }
+
+    if (refreshSelect && refreshSelect.value === normalizedId) {
+        const statusDiv = document.getElementById('refreshCookieAccountStatus');
+        if (statusDiv) {
+            if (resolved.username && resolved.hasPassword) {
+                statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>已配置用户名: ${resolved.username}</span>`;
+            } else {
+                statusDiv.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>未配置用户名和密码，无法刷新</span> <button type="button" class="btn btn-sm btn-outline-info ms-2" onclick="openCredentialConfigFromRefresh()">立即配置</button>`;
+            }
+        }
+        const autoRefreshToggle = document.getElementById('refreshCookieAutoRefresh');
+        if (autoRefreshToggle) {
+            autoRefreshToggle.checked = Boolean(resolved.autoCookieRefresh);
+        }
+    }
+
+    await loadCookies();
+}
+
+async function fetchJSONSilent(url, opts = {}) {
+    if (authToken) {
+        opts.headers = opts.headers || {};
+        opts.headers['Authorization'] = `Bearer ${authToken}`;
+    }
+
+    const res = await fetch(url, opts);
+    if (res.status === 401) {
+        localStorage.removeItem('auth_token');
+        window.location.href = '/';
+        return;
+    }
+    if (!res.ok) {
+        let errorMessage = `HTTP ${res.status}`;
+        try {
+            const errorText = await res.text();
+            if (errorText) {
+                try {
+                    const errorJson = JSON.parse(errorText);
+                    errorMessage = errorJson.detail || errorJson.message || errorText;
+                } catch {
+                    errorMessage = errorText;
+                }
+            }
+        } catch {
+            errorMessage = `HTTP ${res.status} ${res.statusText}`;
+        }
+        throw new Error(errorMessage);
+    }
+    return res.json();
 }
 
 // 加载账号列表到刷新Cookie下拉框
@@ -11779,6 +12211,7 @@ async function loadRefreshCookieAccountList() {
                 option.textContent = `${cookie.id} ${hasCredentials}`;
                 option.dataset.hasCredentials = cookie.username && cookie.has_password ? 'true' : 'false';
                 option.dataset.username = cookie.username || '';
+                option.dataset.autoRefresh = cookie.auto_cookie_refresh === undefined || cookie.auto_cookie_refresh ? 'true' : 'false';
                 select.appendChild(option);
             });
         }
@@ -11801,9 +12234,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 const username = selectedOption.dataset.username;
 
                 if (hasCredentials) {
-                    statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>已配置用户名: ${username}</span>`;
+                    statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>已配置用户名: ${username}</span><span class="text-muted ms-2">手动刷新不会自动输入密码</span>`;
                 } else {
-                    statusDiv.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>未配置用户名和密码，无法刷新</span>`;
+                    statusDiv.innerHTML = `<span class="text-info"><i class="bi bi-info-circle me-1"></i>未配置账密，也可手动选择扫码或其他方式验证</span>`;
+                }
+                const autoRefreshToggle = document.getElementById('refreshCookieAutoRefresh');
+                if (autoRefreshToggle) {
+                    autoRefreshToggle.checked = selectedOption.dataset.autoRefresh !== 'false';
                 }
             } else {
                 statusDiv.innerHTML = '请先选择账号';
@@ -11816,6 +12253,16 @@ document.addEventListener('DOMContentLoaded', function() {
     if (refreshForm) {
         refreshForm.addEventListener('submit', handleRefreshCookie);
     }
+
+    const credentialForm = document.getElementById('credentialConfigFormElement');
+    if (credentialForm) {
+        credentialForm.addEventListener('submit', saveCredentialConfig);
+    }
+
+    const credentialSelect = document.getElementById('credentialConfigAccountSelect');
+    if (credentialSelect) {
+        credentialSelect.addEventListener('change', fillCredentialConfigFromSelectedAccount);
+    }
 });
 
 // 处理刷新Cookie表单提交
@@ -11824,17 +12271,10 @@ async function handleRefreshCookie(event) {
 
     const select = document.getElementById('refreshCookieAccountSelect');
     const cookieId = select.value;
-    const selectedOption = select.options[select.selectedIndex];
-    const showBrowser = document.getElementById('refreshCookieShowBrowser').checked;
+    const autoRefresh = document.getElementById('refreshCookieAutoRefresh')?.checked ?? true;
 
     if (!cookieId) {
         showToast('请选择要刷新的账号', 'warning');
-        return;
-    }
-
-    const hasCredentials = selectedOption.dataset.hasCredentials === 'true';
-    if (!hasCredentials) {
-        showToast('该账号未配置用户名和密码，无法刷新Cookie', 'danger');
         return;
     }
 
@@ -11842,6 +12282,18 @@ async function handleRefreshCookie(event) {
     toggleLoading(true);
 
     try {
+        try {
+            await fetchJSON(`${apiBase}/cookies/${encodeURIComponent(cookieId)}/auto-cookie-refresh`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    auto_cookie_refresh: autoRefresh
+                })
+            });
+        } catch (autoRefreshError) {
+            console.warn('自动刷新Cookie开关同步失败，继续执行本次手动刷新:', autoRefreshError);
+        }
+
         // 调用密码登录API刷新Cookie
         const response = await fetch(`${apiBase}/password-login`, {
             method: 'POST',
@@ -11852,7 +12304,7 @@ async function handleRefreshCookie(event) {
             body: JSON.stringify({
                 account_id: cookieId,
                 refresh_mode: true,  // 标记为刷新模式
-                show_browser: showBrowser
+                show_browser: true
             })
         });
 
@@ -11860,7 +12312,7 @@ async function handleRefreshCookie(event) {
 
         if (data.session_id) {
             // 开始轮询检查登录状态
-            showToast('正在验证账号并刷新Cookie，请稍候...', 'info');
+            showToast('已打开浏览器，请自行选择扫码、密码或其他验证方式，完成后会自动刷新Cookie', 'info');
             startRefreshCookiePolling(data.session_id, cookieId);
         } else {
             toggleLoading(false);
@@ -11870,6 +12322,26 @@ async function handleRefreshCookie(event) {
         toggleLoading(false);
         console.error('刷新Cookie失败:', error);
         showToast('刷新Cookie失败: ' + error.message, 'danger');
+    }
+}
+
+async function toggleAutoCookieRefresh(accountId, enabled) {
+    try {
+        toggleLoading(true);
+        const result = await fetchJSON(`${apiBase}/cookies/${encodeURIComponent(accountId)}/auto-cookie-refresh`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                auto_cookie_refresh: enabled
+            })
+        });
+        showToast(result.message || `自动刷新Cookie已${enabled ? '开启' : '关闭'}`, 'success');
+        loadCookies();
+    } catch (error) {
+        console.error('切换自动刷新Cookie失败:', error);
+        showToast(`切换自动刷新Cookie失败: ${error.message || '未知错误'}`, 'danger');
+    } finally {
+        toggleLoading(false);
     }
 }
 
@@ -11915,7 +12387,7 @@ function startRefreshCookiePolling(sessionId, cookieId) {
     };
 
     let checkCount = 0;
-    const maxChecks = 120; // 最多检查120次，每次2秒，共4分钟
+    const maxChecks = 480; // 最多检查480次，每次2秒，共16分钟，给扫码/人脸验证留足时间
 
     const pollRefreshCookieStatus = async () => {
         if (refreshCookiePollingState.completed || refreshCookiePollingState.inFlight || refreshCookiePollingState.sessionId !== sessionId) {
@@ -16973,7 +17445,7 @@ function getRiskTriggerSceneLabel(triggerScene) {
     const sceneLabels = {
         token_refresh: 'Token刷新',
         auto_cookie_refresh: '自动Cookie刷新',
-        manual_password_refresh: '手动账密刷新',
+        manual_password_refresh: '手动验证刷新',
         manual_qr_refresh: '手动扫码刷新',
         password_login: '密码登录',
         qr_login: '扫码登录'

@@ -2874,6 +2874,7 @@ def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)
         status_note = cookie_details.get('status_note', '') if cookie_details else ''
         username = cookie_details.get('username', '') if cookie_details else ''
         has_password = bool(cookie_details.get('password')) if cookie_details else False
+        auto_cookie_refresh = cookie_details.get('auto_cookie_refresh', True) if cookie_details else True
 
         result.append({
             'id': cookie_id,
@@ -2886,10 +2887,77 @@ def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)
             'status_note': status_note,
             'username': username,
             'has_password': has_password,
+            'show_browser': cookie_details.get('show_browser', False) if cookie_details else False,
+            'auto_cookie_refresh': auto_cookie_refresh,
             'pause_duration': cookie_details.get('pause_duration', 10) if cookie_details else 10,
             'runtime_status': _build_live_runtime_status(cookie_id),
         })
     return result
+
+
+@app.get("/backgrounds")
+def get_backgrounds(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取账号后台运行状态。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+
+    user_id = current_user['user_id']
+    status = cookie_manager.manager.get_background_status(user_id=user_id)
+    accounts = []
+    for account in status.get('accounts', []):
+        cookie_id = account.get('id')
+        cookie_details = db_manager.get_cookie_details(cookie_id)
+        accounts.append({
+            **account,
+            'remark': cookie_details.get('remark', '') if cookie_details else '',
+            'username': cookie_details.get('username', '') if cookie_details else '',
+            'runtime_status': _build_live_runtime_status(cookie_id),
+        })
+
+    return {
+        **status,
+        'accounts': accounts,
+    }
+
+
+@app.post("/backgrounds/{cid}/activate")
+def activate_background(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """启动指定账号作为唯一后台。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+
+    _ensure_cookie_access(cid, current_user)
+    try:
+        cookie_manager.manager.activate_single_background(cid)
+        return {
+            'success': True,
+            'message': f'已启动账号 {cid} 的后台，其它账号后台已停止',
+            'background_status': cookie_manager.manager.get_background_status(user_id=current_user['user_id']),
+        }
+    except Exception as e:
+        logger.error(f"启动唯一后台失败: {cid} - {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=400, detail=safe_client_error("启动后台失败，请稍后重试"))
+
+
+@app.post("/backgrounds/stop-all")
+def stop_all_backgrounds(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """停止当前用户可见的所有账号后台。
+
+    CookieManager 当前是全局唯一后台限制，因此此操作会停止全部后台任务。
+    """
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+
+    try:
+        cookie_manager.manager.stop_all_backgrounds(update_status=True)
+        return {
+            'success': True,
+            'message': '已停止全部账号后台',
+            'background_status': cookie_manager.manager.get_background_status(user_id=current_user['user_id']),
+        }
+    except Exception as e:
+        logger.error(f"停止全部后台失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=400, detail=safe_client_error("停止后台失败，请稍后重试"))
 
 
 @app.get("/api/announcement")
@@ -2995,6 +3063,7 @@ class CookieAccountInfo(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     show_browser: Optional[bool] = None
+    auto_cookie_refresh: Optional[bool] = None
 
 
 @app.post("/cookie/{cid}/account-info")
@@ -3026,6 +3095,24 @@ def update_cookie_account_info(cid: str, info: CookieAccountInfo, current_user: 
         
         if not success:
             raise HTTPException(status_code=400, detail="更新账号信息失败")
+
+        if info.auto_cookie_refresh is not None:
+            refresh_success = db_manager.update_auto_cookie_refresh(cid, bool(info.auto_cookie_refresh))
+            if not refresh_success:
+                raise HTTPException(status_code=400, detail="更新自动刷新Cookie设置失败")
+
+            live_instance = None
+            try:
+                from XianyuAutoAsync import XianyuLive
+                live_instance = XianyuLive.get_instance(cid)
+            except Exception:
+                live_instance = None
+
+            if live_instance is None:
+                live_instance = getattr(cookie_manager.manager, 'live_instances', {}).get(cid)
+
+            if live_instance is not None and hasattr(live_instance, 'enable_cookie_refresh'):
+                live_instance.enable_cookie_refresh(bool(info.auto_cookie_refresh))
         
         # 只有当 cookie 值真的发生变化时才重启任务
         if info.value is not None and info.value != old_cookie_value:
@@ -3550,13 +3637,20 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
             from db_manager import db_manager  # 在函数开头导入，避免作用域问题
             from XianyuAutoAsync import XianyuLive
             try:
-                cookies_dict = slider_instance.login_with_password_playwright(
-                    account=account,
-                    password=password,
-                    show_browser=show_browser,
-                    notification_callback=notification_callback,
-                    force_clean_context=is_refresh_mode
-                )
+                if is_refresh_mode:
+                    cookies_dict = slider_instance.manual_cookie_refresh_playwright(
+                        show_browser=True,
+                        notification_callback=notification_callback,
+                        force_clean_context=True
+                    )
+                else:
+                    cookies_dict = slider_instance.login_with_password_playwright(
+                        account=account,
+                        password=password,
+                        show_browser=show_browser,
+                        notification_callback=notification_callback,
+                        force_clean_context=False
+                    )
                 
                 if cookies_dict is None:
                     failure_message = slider_instance.last_login_error or '登录失败，请检查账号密码是否正确'
@@ -3654,8 +3748,8 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                 update_success = db_manager.update_cookie_account_info(
                     account_id,
                     cookie_value=cookies_str,
-                    username=account,
-                    password=password,
+                    username=None if is_refresh_mode else account,
+                    password=None if is_refresh_mode else password,
                     show_browser=show_browser if not is_refresh_mode else None,  # 刷新模式不更新此字段
                     user_id=user_id  # 新账号时需要提供user_id
                 )
@@ -3879,12 +3973,12 @@ async def password_login(
         # 检查前端是否明确指定了 show_browser 参数
         show_browser_specified = 'show_browser' in request
         show_browser = request.get('show_browser', False)
-        refresh_mode = request.get('refresh_mode', False)  # 刷新模式：从数据库读取账密
+        refresh_mode = request.get('refresh_mode', False)  # 刷新模式：打开浏览器等待用户手动验证
         risk_log_id = None
 
         user_id = current_user['user_id']
 
-        # 刷新模式：从数据库读取已保存的账号密码
+        # 刷新模式：只校验账号归属，不自动输入账号密码
         if refresh_mode and account_id:
             from XianyuAutoAsync import XianyuLive
             cookie_info = db_manager.get_cookie_details(account_id)
@@ -3895,25 +3989,27 @@ async def password_login(
             if cookie_info.get('user_id') != user_id:
                 return {'success': False, 'message': '无权操作此账号'}
 
-            account = cookie_info.get('username')
-            password = cookie_info.get('password')
+            account = cookie_info.get('username') or account_id
+            password = cookie_info.get('password') or ''
 
-            if not account or not password:
-                return {'success': False, 'message': '该账号未配置用户名和密码，无法刷新Cookie'}
+            # 手动刷新 Cookie 必须保留可见浏览器窗口，方便用户完成扫码/人脸验证。
+            show_browser = True
 
-            # 获取 show_browser 设置（只有当前端没有明确指定时，才使用数据库配置）
-            if not show_browser_specified:
-                show_browser = cookie_info.get('show_browser', False)
-
-            log_with_user('info', f"刷新Cookie模式: {account_id}, 用户名: {account}, show_browser: {show_browser}", current_user)
+            log_with_user('info', f"手动刷新Cookie模式: {account_id}, show_browser: {show_browser}，等待用户自行选择验证方式", current_user)
 
             if XianyuLive.is_manual_refresh_active(account_id):
                 return {'success': False, 'message': f'账号 {account_id} 正在执行手动刷新，请稍候再试'}
 
-        if not account_id or not account or not password:
+        if refresh_mode:
+            if not account_id:
+                return {'success': False, 'message': '账号ID不能为空'}
+        elif not account_id or not account or not password:
             return {'success': False, 'message': '账号ID、登录账号和密码不能为空'}
 
-        log_with_user('info', f"开始账号密码登录: {account_id}, 账号: {account}", current_user)
+        if refresh_mode:
+            log_with_user('info', f"开始手动验证刷新Cookie: {account_id}", current_user)
+        else:
+            log_with_user('info', f"开始账号密码登录: {account_id}, 账号: {account}", current_user)
         
         # 生成会话ID
         session_id = secrets.token_urlsafe(16)
@@ -3929,7 +4025,7 @@ async def password_login(
                     session_id=risk_session_id,
                     trigger_scene='manual_password_refresh',
                     result_code='manual_cookie_refresh_started',
-                    event_description='手动触发账密Cookie刷新',
+                    event_description='手动触发浏览器验证Cookie刷新',
                     processing_status='processing',
                     event_meta=_build_risk_event_meta({
                         'account_id': account_id,
@@ -5805,6 +5901,10 @@ class AutoCommentUpdate(BaseModel):
     auto_comment: bool
 
 
+class AutoCookieRefreshUpdate(BaseModel):
+    auto_cookie_refresh: bool
+
+
 class CommentTemplateCreate(BaseModel):
     name: str
     content: str
@@ -5883,6 +5983,63 @@ def get_auto_confirm(cid: str, current_user: Dict[str, Any] = Depends(get_curren
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/cookies/{cid}/auto-cookie-refresh")
+def update_auto_cookie_refresh(cid: str, update_data: AutoCookieRefreshUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """更新账号的自动Cookie刷新设置"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        enabled = bool(update_data.auto_cookie_refresh)
+
+        success = db_manager.update_auto_cookie_refresh(cid, enabled)
+        if not success:
+            raise HTTPException(status_code=500, detail="更新自动刷新Cookie设置失败")
+
+        live_instance = None
+        try:
+            from XianyuAutoAsync import XianyuLive
+            live_instance = XianyuLive.get_instance(cid)
+        except Exception:
+            live_instance = None
+
+        if live_instance is None:
+            live_instance = getattr(cookie_manager.manager, 'live_instances', {}).get(cid)
+
+        if live_instance is not None and hasattr(live_instance, 'enable_cookie_refresh'):
+            live_instance.enable_cookie_refresh(enabled)
+
+        return {
+            "msg": "success",
+            "auto_cookie_refresh": enabled,
+            "message": f"自动刷新Cookie已{'开启' if enabled else '关闭'}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新自动刷新Cookie设置失败: {cid} - {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail=safe_client_error("更新自动刷新Cookie设置失败，请稍后重试"))
+
+
+@app.get("/cookies/{cid}/auto-cookie-refresh")
+def get_auto_cookie_refresh(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取账号的自动Cookie刷新设置"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        enabled = db_manager.get_auto_cookie_refresh(cid)
+        return {
+            "auto_cookie_refresh": enabled,
+            "message": f"自动刷新Cookie当前{'开启' if enabled else '关闭'}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取自动刷新Cookie设置失败: {cid} - {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail=safe_client_error("获取自动刷新Cookie设置失败，请稍后重试"))
 
 
 # ==================== 自动好评相关API ====================

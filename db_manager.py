@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import os
 import threading
@@ -6,7 +7,6 @@ import time
 import json
 import random
 import string
-import re
 import aiohttp
 import io
 import base64
@@ -329,6 +329,7 @@ class DBManager:
                 username TEXT DEFAULT '',
                 password TEXT DEFAULT '',
                 show_browser INTEGER DEFAULT 0,
+                auto_cookie_refresh INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
@@ -955,6 +956,8 @@ Cookie数量: {cookie_count}
                 cursor.execute("ALTER TABLE cookies ADD COLUMN auto_comment INTEGER DEFAULT 0")
                 logger.info("数据库迁移完成：添加auto_comment列")
 
+            self._ensure_cookie_runtime_columns(cursor)
+
             # 历史版本可能缺少订单平台时间字段，不能再依赖旧版本号分支触发
             self._ensure_orders_platform_time_columns(cursor)
 
@@ -1001,6 +1004,30 @@ Cookie数量: {cookie_count}
             logger.error(f"数据库迁移失败: {e}")
             # 迁移失败不应该阻止程序启动
             pass
+
+    def _ensure_cookie_runtime_columns(self, cursor):
+        """确保历史 cookies 表具备运行期需要的账号字段。"""
+        cursor.execute("PRAGMA table_info(cookies)")
+        cookie_columns = {column[1] for column in cursor.fetchall()}
+        column_defs = {
+            'username': "TEXT DEFAULT ''",
+            'password': "TEXT DEFAULT ''",
+            'show_browser': "INTEGER DEFAULT 0",
+            'auto_cookie_refresh': "INTEGER DEFAULT 1",
+            'proxy_type': "TEXT DEFAULT 'none'",
+            'proxy_host': "TEXT DEFAULT ''",
+            'proxy_port': "INTEGER DEFAULT 0",
+            'proxy_user': "TEXT DEFAULT ''",
+            'proxy_pass': "TEXT DEFAULT ''",
+        }
+        for column_name, column_def in column_defs.items():
+            if column_name not in cookie_columns:
+                logger.info(f"添加cookies表的{column_name}列...")
+                self._execute_sql(cursor, f"ALTER TABLE cookies ADD COLUMN {column_name} {column_def}")
+                logger.info(f"数据库迁移完成：添加cookies.{column_name}列")
+
+        self._execute_sql(cursor, "UPDATE cookies SET auto_cookie_refresh = 1 WHERE auto_cookie_refresh IS NULL")
+        self._execute_sql(cursor, "UPDATE cookies SET proxy_type = 'none' WHERE proxy_type IS NULL OR proxy_type = ''")
 
     def _ensure_orders_platform_time_columns(self, cursor):
         """确保 orders 表存在平台时间字段。"""
@@ -1616,10 +1643,22 @@ Cookie数量: {cookie_count}
                 self._execute_sql(cursor, "ALTER TABLE cookies ADD COLUMN show_browser INTEGER DEFAULT 0")
                 logger.info("为cookies表添加show_browser字段")
 
+            # 为cookies表添加auto_cookie_refresh字段（如果不存在）
+            try:
+                self._execute_sql(cursor, "SELECT auto_cookie_refresh FROM cookies LIMIT 1")
+                logger.info("cookies表auto_cookie_refresh字段已存在")
+            except sqlite3.OperationalError:
+                self._execute_sql(cursor, "ALTER TABLE cookies ADD COLUMN auto_cookie_refresh INTEGER DEFAULT 1")
+                self._execute_sql(cursor, "UPDATE cookies SET auto_cookie_refresh = 1 WHERE auto_cookie_refresh IS NULL")
+                logger.info("为cookies表添加auto_cookie_refresh字段")
+            else:
+                self._execute_sql(cursor, "UPDATE cookies SET auto_cookie_refresh = 1 WHERE auto_cookie_refresh IS NULL")
+
             logger.info("✅ cookies表账号登录字段升级完成")
             logger.info("   - username: 用于密码登录的用户名")
             logger.info("   - password: 用于密码登录的密码")
             logger.info("   - show_browser: 登录时是否显示浏览器（0=隐藏，1=显示）")
+            logger.info("   - auto_cookie_refresh: 是否自动刷新Cookie（0=关闭，1=开启）")
             return True
         except Exception as e:
             logger.error(f"升级cookies表账号登录字段失败: {e}")
@@ -2054,9 +2093,11 @@ Cookie数量: {cookie_count}
         with self.lock:
             try:
                 cursor = self.conn.cursor()
+                self._ensure_cookie_runtime_columns(cursor)
+                self.conn.commit()
                 self._execute_sql(cursor, """
                     SELECT id, value, user_id, auto_confirm, remark, status_note,
-                           pause_duration, username, password, show_browser, created_at,
+                           pause_duration, username, password, show_browser, auto_cookie_refresh, created_at,
                            proxy_type, proxy_host, proxy_port, proxy_user, proxy_pass
                     FROM cookies WHERE id = ?
                 """, (cookie_id,))
@@ -2064,7 +2105,7 @@ Cookie数量: {cookie_count}
                 if result:
                     cookie_value = self._decrypt_secret(result[1])
                     password = self._decrypt_secret(result[8])
-                    proxy_pass = self._decrypt_secret(result[15])
+                    proxy_pass = self._decrypt_secret(result[16])
                     return {
                         'id': result[0],
                         'value': cookie_value,
@@ -2076,12 +2117,13 @@ Cookie数量: {cookie_count}
                         'username': result[7] or '',
                         'password': password,
                         'show_browser': bool(result[9]) if result[9] is not None else False,
-                        'created_at': result[10],
+                        'auto_cookie_refresh': bool(result[10]) if result[10] is not None else True,
+                        'created_at': result[11],
                         # 代理配置
-                        'proxy_type': result[11] or 'none',
-                        'proxy_host': result[12] or '',
-                        'proxy_port': result[13] or 0,
-                        'proxy_user': result[14] or '',
+                        'proxy_type': result[12] or 'none',
+                        'proxy_host': result[13] or '',
+                        'proxy_port': result[14] or 0,
+                        'proxy_user': result[15] or '',
                         'proxy_pass': proxy_pass
                     }
                 return None
@@ -2140,6 +2182,38 @@ Cookie数量: {cookie_count}
             except Exception as e:
                 logger.error(f"更新账号自动回复暂停时间失败: {e}")
                 return False
+
+    def update_auto_cookie_refresh(self, cookie_id: str, enabled: bool) -> bool:
+        """更新账号的自动Cookie刷新设置"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._ensure_cookie_runtime_columns(cursor)
+                self._execute_sql(
+                    cursor,
+                    "UPDATE cookies SET auto_cookie_refresh = ? WHERE id = ?",
+                    (1 if enabled else 0, cookie_id)
+                )
+                self.conn.commit()
+                logger.info(f"更新账号 {cookie_id} 自动刷新Cookie设置: {'开启' if enabled else '关闭'}")
+                return True
+            except Exception as e:
+                logger.error(f"更新自动刷新Cookie设置失败: {e}")
+                return False
+
+    def get_auto_cookie_refresh(self, cookie_id: str) -> bool:
+        """获取账号的自动Cookie刷新设置，默认开启"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._ensure_cookie_runtime_columns(cursor)
+                self.conn.commit()
+                self._execute_sql(cursor, "SELECT auto_cookie_refresh FROM cookies WHERE id = ?", (cookie_id,))
+                result = cursor.fetchone()
+                return bool(result[0]) if result and result[0] is not None else True
+            except Exception as e:
+                logger.error(f"获取自动刷新Cookie设置失败: {e}")
+                return True
 
     def get_cookie_pause_duration(self, cookie_id: str) -> int:
         """获取Cookie的自动回复暂停时间"""
@@ -2603,6 +2677,27 @@ Cookie数量: {cookie_count}
                 self.conn.rollback()
                 return False
 
+    def _sanitize_keyword_reply_text(self, reply: str) -> str:
+        """净化关键词回复中的高风险促成交话术。"""
+        sanitized = str(reply or '').strip()
+        risk_replacements = (
+            (re.compile(r'喜欢\s*直接\s*拍'), '有问题可以问我'),
+            (re.compile(r'直接\s*(拍|下单|付款|购买|买)'), '可以看看详情'),
+            (re.compile(r'(拍下|下单|买下|购买)了?之后'), '需要后'),
+            (re.compile(r'(拍下|下单|买下|购买)'), '看看详情'),
+            (re.compile(r'绝对(值得信赖|靠谱|放心)'), '可以放心了解'),
+            (re.compile(r'三十天内有任何问题'), '后续有问题'),
+            (re.compile(r'如果.*?(联系我售后|售后).*'), '后续有问题可以联系我。'),
+        )
+        risk_words = ('宝子', '诱导', '站外', '微信', 'QQ', 'vx', 'V信', '加我')
+        for pattern, replacement in risk_replacements:
+            sanitized = pattern.sub(replacement, sanitized)
+        for word in risk_words:
+            sanitized = sanitized.replace(word, '')
+        sanitized = re.sub(r'[，,、]\s*[，,、]+', '，', sanitized)
+        sanitized = re.sub(r'\s+', ' ', sanitized).strip(' ，,。~～')
+        return sanitized or ('在的，可以看下详情。' if reply else '')
+
     def save_text_keywords_only(self, cookie_id: str, keywords: List[Tuple[str, str, str]]) -> bool:
         """保存文本关键字列表，只删除文本类型的关键词，保留图片关键词"""
         with self.lock:
@@ -2641,10 +2736,11 @@ Cookie数量: {cookie_count}
                 for keyword, reply, item_id in keywords:
                     # 标准化item_id：空字符串转为NULL
                     normalized_item_id = item_id if item_id and item_id.strip() else None
+                    sanitized_reply = self._sanitize_keyword_reply_text(reply)
 
                     self._execute_sql(cursor,
                         "INSERT INTO keywords (cookie_id, keyword, reply, item_id, type) VALUES (?, ?, ?, ?, 'text')",
-                        (cookie_id, keyword, reply, normalized_item_id))
+                        (cookie_id, keyword, sanitized_reply, normalized_item_id))
 
                 self.conn.commit()
                 logger.info(f"文本关键字保存成功: {cookie_id}, {len(keywords)}条，图片关键词已保留")
@@ -2656,6 +2752,39 @@ Cookie数量: {cookie_count}
                 logger.error(f"文本关键字保存失败: {e}")
                 self.conn.rollback()
                 return False
+
+    def sanitize_existing_text_keywords(self, cookie_id: str = None) -> int:
+        """净化已保存文本关键词中的高风险促成交话术。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                if cookie_id:
+                    self._execute_sql(
+                        cursor,
+                        "SELECT rowid, reply FROM keywords WHERE cookie_id = ? AND (type IS NULL OR type = 'text')",
+                        (cookie_id,)
+                    )
+                else:
+                    self._execute_sql(
+                        cursor,
+                        "SELECT rowid, reply FROM keywords WHERE type IS NULL OR type = 'text'"
+                    )
+
+                updated_count = 0
+                for rowid, reply in cursor.fetchall():
+                    sanitized = self._sanitize_keyword_reply_text(reply)
+                    if sanitized != (reply or '').strip():
+                        self._execute_sql(cursor, "UPDATE keywords SET reply = ? WHERE rowid = ?", (sanitized, rowid))
+                        updated_count += 1
+
+                if updated_count:
+                    self.conn.commit()
+                    logger.warning(f"已净化 {updated_count} 条文本关键词回复话术")
+                return updated_count
+            except Exception as e:
+                logger.error(f"净化文本关键词回复失败: {e}")
+                self.conn.rollback()
+                return 0
     
     def get_keywords(self, cookie_id: str) -> List[Tuple[str, str]]:
         """获取指定Cookie的关键字列表（向后兼容方法）"""

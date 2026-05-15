@@ -2663,6 +2663,19 @@ class XianyuSliderStealth:
             monitor_page = self._select_monitor_page(context, monitor_page)
             self._attempt_solve_slider_on_page(monitor_page)
 
+            if monitor_page:
+                try:
+                    has_verification_page = self._page_looks_like_verification(monitor_page)
+                    has_qr, _ = self._detect_qr_code_verification(monitor_page)
+                    if has_verification_page or has_qr:
+                        logger.info(f"【{self.pure_user_id}】仍检测到二维码/人脸验证页，继续等待用户完成验证")
+                        time.sleep(check_interval)
+                        waited_time += check_interval
+                        logger.info(f"【{self.pure_user_id}】等待验证中... (已等待{waited_time}秒/{max_wait_time}秒)")
+                        continue
+                except Exception as e:
+                    logger.debug(f"【{self.pure_user_id}】等待验证时复检验证页失败: {e}")
+
             login_success, success_page, _ = self._probe_context_login_success(context, monitor_page)
             if login_success:
                 return True, success_page or monitor_page
@@ -2672,6 +2685,169 @@ class XianyuSliderStealth:
             logger.info(f"【{self.pure_user_id}】等待验证中... (已等待{waited_time}秒/{max_wait_time}秒)")
 
         return False, self._select_monitor_page(context, monitor_page)
+
+    def _ensure_manual_refresh_login_entry(self, context, page) -> Any:
+        """手动刷新入口兜底：旧 Cookie 可能让 /im 卡在半登录态，必要时清理后重新打开登录入口。"""
+        try:
+            login_success, active_page, _ = self._probe_context_login_success(context, page)
+            if login_success:
+                return active_page or page
+
+            monitor_page = self._select_monitor_page(context, active_page or page) or page
+            if self._page_has_login_form(monitor_page) or self._page_looks_like_verification(monitor_page):
+                return monitor_page
+
+            logger.warning(
+                f"【{self.pure_user_id}】手动刷新未检测到正常登录入口，清理旧会话状态后重新打开消息页登录入口"
+            )
+            try:
+                context.clear_cookies()
+            except Exception as clear_cookie_e:
+                logger.debug(f"【{self.pure_user_id}】清理旧 Cookie 失败: {clear_cookie_e}")
+
+            self._clear_page_storage_state(context, monitor_page)
+            target_page = monitor_page if monitor_page and not monitor_page.is_closed() else context.new_page()
+            target_page.goto("https://www.goofish.com/im", wait_until='domcontentloaded', timeout=60000)
+            time.sleep(2)
+            return target_page
+        except Exception as e:
+            logger.warning(f"【{self.pure_user_id}】手动刷新登录入口兜底失败（继续原流程）: {e}")
+            return page
+
+    def _request_login_token_in_browser_context(self, context, page) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """在当前浏览器上下文里请求 IM 登录 token，用于确认 Cookie 已真正可用。"""
+        try:
+            from utils.xianyu_utils import generate_device_id, generate_sign
+
+            cookies_dict = self._snapshot_context_cookies(context)
+            timestamp = str(int(time.time() * 1000))
+            device_id = generate_device_id(self.pure_user_id)
+            data_val = '{"appKey":"444e9908a51d1cb236a27862abc769c9","deviceId":"' + device_id + '"}'
+            token = cookies_dict.get('_m_h5_tk', '').split('_')[0] if cookies_dict.get('_m_h5_tk') else ''
+
+            params = {
+                'jsv': '2.7.2',
+                'appKey': '34839810',
+                't': timestamp,
+                'sign': generate_sign(timestamp, token, data_val),
+                'v': '1.0',
+                'type': 'originaljson',
+                'accountSite': 'xianyu',
+                'dataType': 'json',
+                'timeout': '20000',
+                'api': 'mtop.taobao.idlemessage.pc.login.token',
+                'sessionOption': 'AutoLoginOnly',
+                'dangerouslySetWindvaneParams': '%5Bobject%20Object%5D',
+                'smToken': 'token',
+                'queryToken': 'sm',
+                'sm': 'sm',
+                'spm_cnt': 'a21ybx.im.0.0',
+                'spm_pre': 'a21ybx.home.sidebar.1.4c053da6vYwnmf',
+                'log_id': '4c053da6vYwnmf',
+            }
+            headers = {
+                'accept': 'application/json',
+                'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'cache-control': 'no-cache',
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': 'https://www.goofish.com',
+                'pragma': 'no-cache',
+                'referer': 'https://www.goofish.com/im',
+                'user-agent': self.browser_features.get('user_agent') or (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36'
+                ),
+            }
+            api_url = "https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/"
+            response = context.request.post(
+                api_url,
+                params=params,
+                form={'data': data_val},
+                headers=headers,
+                timeout=30000,
+            )
+            response_text = response.text()
+            try:
+                payload = json.loads(response_text)
+            except Exception:
+                payload = {'raw_text': response_text[:1000]}
+
+            ret_value = payload.get('ret', []) if isinstance(payload, dict) else []
+            logger.info(f"【{self.pure_user_id}】手动刷新浏览器侧Token确认响应: status={response.status}, ret={ret_value}")
+
+            if isinstance(payload, dict) and any('SUCCESS::调用成功' in str(ret) for ret in ret_value):
+                if payload.get('data', {}).get('accessToken'):
+                    return True, None, payload
+
+            verification_url = None
+            if isinstance(payload, dict):
+                verification_url = payload.get('data', {}).get('url')
+            if verification_url:
+                return False, verification_url, payload
+
+            return False, None, payload if isinstance(payload, dict) else {}
+        except Exception as e:
+            logger.warning(f"【{self.pure_user_id}】手动刷新浏览器侧Token确认失败: {e}")
+            return False, None, {'error': str(e)}
+
+    def _stabilize_manual_refresh_cookies(self, context, page, max_wait_time: int = 900, check_interval: int = 5) -> Optional[Dict[str, str]]:
+        """登录完成后继续保持浏览器，直到 IM token API 确认可用后再抓取 Cookie。"""
+        waited_time = 0
+        monitor_page = page
+        token_attempt = 0
+
+        while waited_time < max_wait_time:
+            monitor_page = self._select_monitor_page(context, monitor_page) or monitor_page
+            self._attempt_solve_slider_on_page(monitor_page)
+
+            try:
+                if monitor_page and not self._page_looks_like_verification(monitor_page):
+                    current_url = self._safe_page_url(monitor_page)
+                    if 'goofish.com/im' not in current_url and 'h5api.m.goofish.com' not in current_url:
+                        try:
+                            monitor_page.goto("https://www.goofish.com/im", wait_until='domcontentloaded', timeout=30000)
+                            time.sleep(2)
+                        except Exception as goto_e:
+                            logger.debug(f"【{self.pure_user_id}】手动刷新回到消息页失败: {goto_e}")
+            except Exception:
+                pass
+
+            login_success, success_page, cookies_dict = self._probe_context_login_success(context, monitor_page)
+            monitor_page = success_page or monitor_page
+            if not login_success or not self._has_completed_login_cookies(cookies_dict):
+                logger.info(f"【{self.pure_user_id}】手动刷新等待登录态和关键 Cookie 完成...")
+                time.sleep(check_interval)
+                waited_time += check_interval
+                continue
+
+            token_attempt += 1
+            token_ok, verification_url, token_payload = self._request_login_token_in_browser_context(context, monitor_page)
+            if token_ok:
+                stable_cookies = self._snapshot_context_cookies(context)
+                if self._has_completed_login_cookies(stable_cookies):
+                    logger.success(f"【{self.pure_user_id}】手动刷新 Cookie 已通过浏览器侧Token确认")
+                    self._log_cookie_snapshot_integrity(stable_cookies, "手动刷新Token确认后")
+                    return stable_cookies
+
+            if verification_url:
+                logger.warning(f"【{self.pure_user_id}】手动刷新Token确认需要继续验证，已打开验证页: {verification_url}")
+                try:
+                    verify_page = monitor_page if monitor_page and not monitor_page.is_closed() else context.new_page()
+                    verify_page.goto(verification_url, wait_until='domcontentloaded', timeout=60000)
+                    monitor_page = verify_page
+                    time.sleep(2)
+                except Exception as verify_e:
+                    logger.warning(f"【{self.pure_user_id}】打开手动刷新Token验证页失败: {verify_e}")
+
+            ret_value = token_payload.get('ret') if isinstance(token_payload, dict) else None
+            logger.info(
+                f"【{self.pure_user_id}】手动刷新Token确认未完成，第{token_attempt}次，ret={ret_value}，继续等待用户验证"
+            )
+            time.sleep(check_interval)
+            waited_time += check_interval
+
+        logger.error(f"【{self.pure_user_id}】手动刷新等待Token确认超时（{max_wait_time}秒）")
+        return None
 
     def _notify_verification_required(
         self,
@@ -6248,6 +6424,199 @@ class XianyuSliderStealth:
             logger.debug(traceback.format_exc())
             return None
     
+    def manual_cookie_refresh_playwright(self, show_browser: bool = True,
+                                         notification_callback: Optional[Callable] = None,
+                                         force_clean_context: bool = True) -> dict:
+        """打开可见浏览器等待用户手动完成登录/验证，然后读取 Cookie。
+
+        手动刷新不自动输入账号密码，用户可以在闲鱼页面自行选择扫码、密码或其他验证方式。
+        """
+        self.last_login_error = ""
+        previous_slider_refresh_mode = getattr(self, '_slider_refresh_mode', False)
+        self._slider_refresh_mode = True
+        playwright = None
+        browser = None
+        context = None
+
+        try:
+            if not self._check_date_validity():
+                logger.error(f"【{self.pure_user_id}】日期验证失败，无法执行手动刷新")
+                return self._fail_login("日期验证失败，无法执行手动刷新")
+
+            browser_mode = "有头" if show_browser else "无头"
+            logger.info(f"【{self.pure_user_id}】开始{browser_mode}模式手动刷新 Cookie 流程（不自动输入账号密码）...")
+
+            import sys
+            from pathlib import Path
+            if getattr(sys, 'frozen', False):
+                exe_dir = Path(sys.executable).parent
+                playwright_dir = exe_dir / 'playwright'
+                if playwright_dir.exists():
+                    chromium_dirs = list(playwright_dir.glob('chromium-*'))
+                    for chromium_dir in chromium_dirs:
+                        chrome_exe = chromium_dir / 'chrome-win' / 'chrome.exe'
+                        if chrome_exe.exists() and chrome_exe.stat().st_size > 0:
+                            if 'PLAYWRIGHT_BROWSERS_PATH' in os.environ:
+                                old_path = os.environ['PLAYWRIGHT_BROWSERS_PATH']
+                                if old_path != str(playwright_dir):
+                                    logger.info(f"【{self.pure_user_id}】清除旧的环境变量: {old_path}")
+                                    del os.environ['PLAYWRIGHT_BROWSERS_PATH']
+                            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(playwright_dir)
+                            logger.info(f"【{self.pure_user_id}】已设置PLAYWRIGHT_BROWSERS_PATH: {playwright_dir}")
+                            break
+
+            browser_features = self._get_random_browser_features()
+            self.browser_features = browser_features
+            self.profile_id = browser_features.get("profile_id", "unknown")
+
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor',
+                '--lang=zh-CN',
+                '--disable-infobars',
+                '--disable-extensions',
+                '--disable-popup-blocking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+            ]
+
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=not show_browser,
+                args=browser_args
+            )
+            context = browser.new_context(
+                viewport={'width': browser_features['viewport_width'], 'height': browser_features['viewport_height']},
+                user_agent=browser_features['user_agent'],
+                locale=browser_features['locale'],
+                accept_downloads=True,
+                ignore_https_errors=True,
+                extra_http_headers={
+                    'Accept-Language': browser_features['accept_lang']
+                }
+            )
+
+            try:
+                from db_manager import db_manager as _db
+                _cookie_info = _db.get_cookie_details(self.pure_user_id)
+                if _cookie_info and _cookie_info.get('value'):
+                    _cookies_to_inject = []
+                    for pair in _cookie_info['value'].split(';'):
+                        pair = pair.strip()
+                        if '=' not in pair:
+                            continue
+                        name, value = pair.split('=', 1)
+                        name = name.strip()
+                        value = value.strip()
+                        if not name:
+                            continue
+                        _cookies_to_inject.append({
+                            'name': name,
+                            'value': value,
+                            'domain': '.goofish.com',
+                            'path': '/',
+                        })
+                        if name in ('_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 'sgcookie', 'unb', 't', 'cna'):
+                            _cookies_to_inject.append({
+                                'name': name,
+                                'value': value,
+                                'domain': '.taobao.com',
+                                'path': '/',
+                            })
+                    if _cookies_to_inject:
+                        context.add_cookies(_cookies_to_inject)
+                        logger.info(f"【{self.pure_user_id}】手动刷新已注入 {len(_cookies_to_inject)} 个历史 Cookie")
+            except Exception as inject_e:
+                logger.warning(f"【{self.pure_user_id}】手动刷新注入历史 Cookie 失败（不影响流程）: {inject_e}")
+
+            page = context.new_page()
+            if show_browser:
+                page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+                window.chrome = { runtime: {} };
+                """)
+            else:
+                page.add_init_script(self._get_stealth_script(browser_features))
+
+            try:
+                page.goto("https://www.goofish.com", wait_until='domcontentloaded', timeout=15000)
+                time.sleep(random.uniform(1.0, 2.0))
+            except Exception as warmup_e:
+                logger.warning(f"【{self.pure_user_id}】手动刷新预访问失败（不影响流程）: {warmup_e}")
+
+            login_url = "https://www.goofish.com/im"
+            logger.info(f"【{self.pure_user_id}】手动刷新已打开页面: {login_url}")
+            page.goto(login_url, wait_until='domcontentloaded', timeout=60000)
+            time.sleep(2)
+            page = self._ensure_manual_refresh_login_entry(context, page)
+
+            logger.info(f"【{self.pure_user_id}】请在打开的浏览器中自行选择登录/验证方式，完成后程序会自动读取 Cookie")
+            try:
+                has_qr, qr_frame = self._detect_qr_code_verification(page)
+                if has_qr and notification_callback:
+                    self._notify_verification_required(
+                        getattr(qr_frame, 'verification_type', 'qr_verify'),
+                        getattr(qr_frame, 'verify_url', None) or getattr(qr_frame, 'url', None),
+                        getattr(qr_frame, 'screenshot_path', None),
+                        notification_callback,
+                        '手动刷新Cookie',
+                    )
+            except Exception as detect_e:
+                logger.debug(f"【{self.pure_user_id}】手动刷新检测验证入口失败: {detect_e}")
+
+            login_success, active_page = self._wait_for_context_login(
+                context,
+                page,
+                max_wait_time=900,
+                check_interval=5,
+            )
+            if not login_success:
+                return self._fail_login("等待用户完成手动登录/验证超时（900秒）")
+
+            cookies_dict = self._stabilize_manual_refresh_cookies(
+                context,
+                active_page or page,
+                max_wait_time=900,
+                check_interval=5,
+            )
+            if cookies_dict:
+                logger.success(f"【{self.pure_user_id}】手动刷新获取 Cookie 成功，{len(cookies_dict)} 个字段")
+                self._log_cookie_snapshot_integrity(cookies_dict, "手动刷新完成后")
+                return cookies_dict
+
+            return self._fail_login("手动登录成功后未通过Token确认，Cookie仍不可用")
+
+        except Exception as e:
+            logger.error(f"【{self.pure_user_id}】手动刷新 Cookie 流程异常: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return self._fail_login(str(e) if str(e) else "手动刷新 Cookie 流程异常")
+        finally:
+            try:
+                if context:
+                    context.close()
+                if browser:
+                    browser.close()
+                if playwright:
+                    playwright.stop()
+                logger.info(f"【{self.pure_user_id}】手动刷新浏览器已关闭")
+            except Exception as close_e:
+                logger.warning(f"【{self.pure_user_id}】关闭手动刷新浏览器时出错: {close_e}")
+                try:
+                    if playwright:
+                        playwright.stop()
+                except Exception:
+                    pass
+            self._slider_refresh_mode = previous_slider_refresh_mode
+
     def login_with_password_playwright(self, account: str, password: str, show_browser: bool = False,
                                       notification_callback: Optional[Callable] = None,
                                       force_clean_context: bool = False) -> dict:

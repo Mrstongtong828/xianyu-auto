@@ -83,6 +83,12 @@
           <span>账号管理</span>
         </a>
       </div>
+      <div class="nav-item" data-menu-id="backgrounds">
+        <a href="javascript:void(0)" class="nav-link" onclick="showSection('backgrounds')">
+          <i class="bi bi-hdd-network"></i>
+          <span>后台管理</span>
+        </a>
+      </div>
       <div class="nav-item" data-menu-id="items">
         <a href="javascript:void(0)" class="nav-link" onclick="showSection('items')">
           <i class="bi bi-box-seam"></i>
@@ -440,6 +446,73 @@
       </div>
     </div>
 
+    <!-- 后台管理内容 -->
+    <div id="backgrounds-section" class="content-section">
+      <div class="content-header">
+        <h2 class="mb-0">
+          <i class="bi bi-hdd-network me-2"></i>
+          后台管理
+        </h2>
+        <p class="text-muted mb-0">只允许一个账号后台运行，降低系统占用</p>
+      </div>
+      <div class="content-body">
+        <div class="card mb-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-activity me-2"></i>运行状态</span>
+            <div class="d-flex gap-2">
+              <button class="btn btn-sm btn-outline-primary" onclick="loadBackgroundManager()">
+                <i class="bi bi-arrow-clockwise me-1"></i>刷新
+              </button>
+              <button class="btn btn-sm btn-outline-danger" onclick="stopAllBackgrounds()">
+                <i class="bi bi-stop-circle me-1"></i>停止全部
+              </button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="row g-3 mb-3">
+              <div class="col-md-4">
+                <div class="border rounded p-3 h-100">
+                  <div class="text-muted small">当前后台</div>
+                  <div class="fw-bold fs-5" id="backgroundActiveAccount">加载中...</div>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="border rounded p-3 h-100">
+                  <div class="text-muted small">运行数量</div>
+                  <div class="fw-bold fs-5" id="backgroundRunningCount">-</div>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="border rounded p-3 h-100">
+                  <div class="text-muted small">限制</div>
+                  <div class="fw-bold fs-5" id="backgroundLimit">最多 1 个后台</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="table-responsive">
+              <table class="table table-hover align-middle">
+                <thead>
+                  <tr>
+                    <th>账号</th>
+                    <th>备注</th>
+                    <th>状态</th>
+                    <th>连接</th>
+                    <th class="text-end">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="backgroundAccountsTableBody">
+                  <tr>
+                    <td colspan="5" class="text-center text-muted py-4">正在加载...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 账号管理内容 -->
     <div id="accounts-section" class="content-section">
       <div class="content-header">
@@ -476,7 +549,13 @@
                     <i class="bi bi-arrow-repeat me-2"></i>
                     <span class="fw-bold">手动刷新 Cookie</span>
                     <br>
-                    <small class="opacity-75">使用已保存账密手动刷新已有账号</small>
+                    <small class="opacity-75">打开浏览器后自行选择验证方式</small>
+                  </button>
+                  <button type="button" class="btn btn-outline-info btn-lg flex-fill credential-config-btn" onclick="toggleCredentialConfigForm()" style="max-width: 300px;">
+                    <i class="bi bi-person-gear me-2"></i>
+                    <span class="fw-bold">配置账密</span>
+                    <br>
+                    <small class="opacity-75">为已有账号单独保存用户名和密码</small>
                   </button>
                   <button type="button" class="btn btn-outline-secondary btn-lg flex-fill manual-input-btn" onclick="toggleManualInput()" style="max-width: 300px;">
                     <i class="bi bi-keyboard me-2"></i>
@@ -489,7 +568,60 @@
             </div>
 
             <div class="text-center text-muted small mb-4">
-              建议优先使用扫码登录或账密登录添加账号，并尽快配置账密。未配置账密时，账号掉线后部分风控与恢复场景可能无法继续处理；如遇掉线，可优先尝试扫码登录或手动刷新 Cookie。
+              建议优先使用扫码登录或账密登录添加账号，并尽快配置账密。自动刷新 Cookie 需要已保存账密；手动刷新 Cookie 会打开浏览器，可自行选择扫码、密码或其他验证方式。
+            </div>
+
+            <!-- 配置账密表单（默认隐藏） -->
+            <div id="credentialConfigForm" style="display: none;">
+              <div class="alert alert-info">
+                <i class="bi bi-person-gear me-2"></i>
+                <strong>提示：</strong>这里保存的账号密码用于账密登录和自动刷新 Cookie；手动刷新 Cookie 不会自动输入密码。
+              </div>
+              <form id="credentialConfigFormElement" class="row g-3">
+                <div class="col-md-4">
+                  <label for="credentialConfigAccountSelect" class="form-label">选择账号</label>
+                  <select class="form-select" id="credentialConfigAccountSelect" required>
+                    <option value="">请选择账号...</option>
+                  </select>
+                </div>
+                <div class="col-md-4">
+                  <label for="credentialConfigUsername" class="form-label">登录账号</label>
+                  <input type="text" class="form-control" id="credentialConfigUsername" placeholder="手机号、邮箱或闲鱼登录名" required>
+                </div>
+                <div class="col-md-4">
+                  <label for="credentialConfigPassword" class="form-label">登录密码</label>
+                  <input type="password" class="form-control" id="credentialConfigPassword" placeholder="请输入登录密码" required>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="credentialConfigShowBrowser">
+                    <label class="form-check-label" for="credentialConfigShowBrowser">
+                      账密流程显示浏览器
+                    </label>
+                  </div>
+                  <div class="form-text">仅建议本机排查验证页面时开启，服务器环境不要开启。</div>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="credentialConfigAutoRefresh" checked>
+                    <label class="form-check-label" for="credentialConfigAutoRefresh">
+                      自动刷新 Cookie
+                    </label>
+                  </div>
+                  <div class="form-text">开启后账号运行时会按周期自动尝试刷新 Cookie。</div>
+                </div>
+                <div class="col-12">
+                  <button type="submit" class="btn btn-info text-white">
+                    <i class="bi bi-check-lg me-1"></i>保存账密配置
+                  </button>
+                  <button type="button" class="btn btn-outline-warning ms-2" onclick="toggleRefreshCookieForm()">
+                    <i class="bi bi-arrow-repeat me-1"></i>去手动刷新
+                  </button>
+                  <button type="button" class="btn btn-secondary ms-2" onclick="toggleCredentialConfigForm()">
+                    <i class="bi bi-x-circle me-1"></i>取消
+                  </button>
+                </div>
+              </form>
             </div>
 
             <!-- 账号密码登录表单（默认隐藏） -->
@@ -560,7 +692,7 @@
             <div id="refreshCookieForm" style="display: none;">
               <div class="alert alert-warning">
                 <i class="bi bi-exclamation-triangle me-2"></i>
-                <strong>提示：</strong>用于已有账号的手动账密刷新。本流程会读取该账号已保存的用户名和密码，并刷新当前账号 Cookie。
+                <strong>提示：</strong>用于已有账号的手动验证刷新。启动后会打开浏览器，请自行选择扫码、密码或其他验证方式，完成后系统会自动读取并刷新当前账号 Cookie。
               </div>
               <form id="refreshCookieFormElement" class="row g-3">
                 <div class="col-md-6">
@@ -577,15 +709,26 @@
                 </div>
                 <div class="col-12">
                   <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="refreshCookieShowBrowser" value="1">
+                    <input class="form-check-input" type="checkbox" id="refreshCookieShowBrowser" value="1" checked disabled>
                     <label class="form-check-label" for="refreshCookieShowBrowser">
-                      显示浏览器窗口（仅影响本次刷新，不会改变自动刷新的设置；如果使用服务器，请勿打开该开关）
+                      刷新时固定打开浏览器窗口，便于完成扫码/人脸验证
+                    </label>
+                  </div>
+                </div>
+                <div class="col-12">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="refreshCookieAutoRefresh" value="1">
+                    <label class="form-check-label" for="refreshCookieAutoRefresh">
+                      自动刷新 Cookie（保存到该账号配置）
                     </label>
                   </div>
                 </div>
                 <div class="col-12">
                   <button type="submit" class="btn btn-warning">
                     <i class="bi bi-arrow-repeat me-1"></i>验证并刷新Cookie
+                  </button>
+                  <button type="button" class="btn btn-outline-info ms-2" onclick="openCredentialConfigFromRefresh()">
+                    <i class="bi bi-person-gear me-1"></i>配置自动刷新账密
                   </button>
                   <button type="button" class="btn btn-secondary ms-2" onclick="toggleRefreshCookieForm()">
                     <i class="bi bi-x-circle me-1"></i>取消
@@ -814,7 +957,8 @@
                     <th style="width: 10%">商品ID</th>
                     <th style="width: 16%">商品标题</th>
                     <th style="width: 18%">商品详情</th>
-                    <th style="width: 18%">商品价格</th>
+                    <th style="width: 10%">商品价格</th>
+                    <th style="width: 10%">购买链接</th>
                     <th style="width: 8%">多规格</th>
                     <th style="width: 8%">多数量发货</th>
                     <th style="width: 10%">更新时间</th>
@@ -823,7 +967,7 @@
                 </thead>
                 <tbody id="itemsTableBody">
                   <tr>
-                    <td colspan="10" class="text-center text-muted">加载中...</td>
+                    <td colspan="11" class="text-center text-muted">加载中...</td>
                   </tr>
                 </tbody>
               </table>
@@ -5061,13 +5205,13 @@
             <div class="mb-3">
               <label class="form-label">用户名</label>
               <input type="text" class="form-control" id="editAccountUsername" placeholder="输入用户名（可选）">
-              <div class="form-text">用于账密登录、手动刷新 Cookie 和自动恢复</div>
+              <div class="form-text">用于账密登录、自动刷新 Cookie 和自动恢复</div>
             </div>
             
             <div class="mb-3">
               <label class="form-label">密码</label>
               <input type="password" class="form-control" id="editAccountPassword" placeholder="输入密码（可选）">
-              <div class="form-text">用于账密登录、手动刷新 Cookie 和自动恢复</div>
+              <div class="form-text">用于账密登录、自动刷新 Cookie 和自动恢复</div>
             </div>
             
             <div class="mb-3">
@@ -5080,7 +5224,7 @@
               </div>
               <div class="form-text text-warning">
                 <i class="bi bi-exclamation-triangle me-1"></i>
-                该设置会影响账密登录、手动刷新 Cookie 和自动恢复流程。仅建议在本机排查滑块、人脸或风控页面时开启，服务器环境不要开启。
+                该设置会影响账密登录和自动恢复流程；手动刷新 Cookie 会固定打开浏览器。仅建议在本机排查滑块、人脸或风控页面时开启，服务器环境不要开启。
               </div>
             </div>
 
