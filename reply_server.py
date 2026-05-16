@@ -20,7 +20,6 @@ import io
 import asyncio
 import queue
 from collections import defaultdict
-from threading import Lock
 
 import cookie_manager
 from db_manager import db_manager
@@ -72,8 +71,6 @@ security = HTTPBearer(auto_error=False)
 # 扫码登录检查锁 - 防止并发处理同一个session
 qr_check_locks = defaultdict(lambda: asyncio.Lock())
 qr_check_processed = {}  # 记录已处理的session: {session_id: {'processed': bool, 'timestamp': float}}
-risk_health_alert_tracker = {}
-risk_health_alert_lock = Lock()
 
 # ========================= 防暴力破解配置 =========================
 # IP 登录失败记录: {ip: {'attempts': int, 'first_attempt': float, 'last_attempt': float, 'blocked_until': float}}
@@ -2877,7 +2874,6 @@ def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)
         status_note = cookie_details.get('status_note', '') if cookie_details else ''
         username = cookie_details.get('username', '') if cookie_details else ''
         has_password = bool(cookie_details.get('password')) if cookie_details else False
-        auto_cookie_refresh = cookie_details.get('auto_cookie_refresh', True) if cookie_details else True
 
         result.append({
             'id': cookie_id,
@@ -2890,77 +2886,10 @@ def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)
             'status_note': status_note,
             'username': username,
             'has_password': has_password,
-            'show_browser': cookie_details.get('show_browser', False) if cookie_details else False,
-            'auto_cookie_refresh': auto_cookie_refresh,
             'pause_duration': cookie_details.get('pause_duration', 10) if cookie_details else 10,
             'runtime_status': _build_live_runtime_status(cookie_id),
         })
     return result
-
-
-@app.get("/backgrounds")
-def get_backgrounds(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """获取账号后台运行状态。"""
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
-
-    user_id = current_user['user_id']
-    status = cookie_manager.manager.get_background_status(user_id=user_id)
-    accounts = []
-    for account in status.get('accounts', []):
-        cookie_id = account.get('id')
-        cookie_details = db_manager.get_cookie_details(cookie_id)
-        accounts.append({
-            **account,
-            'remark': cookie_details.get('remark', '') if cookie_details else '',
-            'username': cookie_details.get('username', '') if cookie_details else '',
-            'runtime_status': _build_live_runtime_status(cookie_id),
-        })
-
-    return {
-        **status,
-        'accounts': accounts,
-    }
-
-
-@app.post("/backgrounds/{cid}/activate")
-def activate_background(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """启动指定账号作为唯一后台。"""
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
-
-    _ensure_cookie_access(cid, current_user)
-    try:
-        cookie_manager.manager.activate_single_background(cid)
-        return {
-            'success': True,
-            'message': f'已启动账号 {cid} 的后台，其它账号后台已停止',
-            'background_status': cookie_manager.manager.get_background_status(user_id=current_user['user_id']),
-        }
-    except Exception as e:
-        logger.error(f"启动唯一后台失败: {cid} - {mask_sensitive_text(e)}")
-        raise HTTPException(status_code=400, detail=safe_client_error("启动后台失败，请稍后重试"))
-
-
-@app.post("/backgrounds/stop-all")
-def stop_all_backgrounds(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """停止当前用户可见的所有账号后台。
-
-    CookieManager 当前是全局唯一后台限制，因此此操作会停止全部后台任务。
-    """
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
-
-    try:
-        cookie_manager.manager.stop_all_backgrounds(update_status=True)
-        return {
-            'success': True,
-            'message': '已停止全部账号后台',
-            'background_status': cookie_manager.manager.get_background_status(user_id=current_user['user_id']),
-        }
-    except Exception as e:
-        logger.error(f"停止全部后台失败: {mask_sensitive_text(e)}")
-        raise HTTPException(status_code=400, detail=safe_client_error("停止后台失败，请稍后重试"))
 
 
 @app.get("/api/announcement")
@@ -3066,7 +2995,6 @@ class CookieAccountInfo(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     show_browser: Optional[bool] = None
-    auto_cookie_refresh: Optional[bool] = None
 
 
 @app.post("/cookie/{cid}/account-info")
@@ -3098,24 +3026,6 @@ def update_cookie_account_info(cid: str, info: CookieAccountInfo, current_user: 
         
         if not success:
             raise HTTPException(status_code=400, detail="更新账号信息失败")
-
-        if info.auto_cookie_refresh is not None:
-            refresh_success = db_manager.update_auto_cookie_refresh(cid, bool(info.auto_cookie_refresh))
-            if not refresh_success:
-                raise HTTPException(status_code=400, detail="更新自动刷新Cookie设置失败")
-
-            live_instance = None
-            try:
-                from XianyuAutoAsync import XianyuLive
-                live_instance = XianyuLive.get_instance(cid)
-            except Exception:
-                live_instance = None
-
-            if live_instance is None:
-                live_instance = getattr(cookie_manager.manager, 'live_instances', {}).get(cid)
-
-            if live_instance is not None and hasattr(live_instance, 'enable_cookie_refresh'):
-                live_instance.enable_cookie_refresh(bool(info.auto_cookie_refresh))
         
         # 只有当 cookie 值真的发生变化时才重启任务
         if info.value is not None and info.value != old_cookie_value:
@@ -3469,106 +3379,6 @@ def _empty_slider_session_stats() -> Dict[str, Any]:
         'range_label': '所有',
     }
 
-
-def _empty_risk_health_summary(lookback_minutes: int = 1440) -> Dict[str, Any]:
-    return {
-        'health_level': 'normal',
-        'health_label': '运行平稳',
-        'lookback_minutes': lookback_minutes,
-        'failed_count': 0,
-        'processing_count': 0,
-        'slider_failed_count': 0,
-        'cookie_refresh_failed_count': 0,
-        'risk_protected_count': 0,
-        'accounts_with_failures': 0,
-        'accounts_with_processing': 0,
-        'disabled_accounts': 0,
-        'risk_protected_accounts': 0,
-        'top_failed_accounts': [],
-        'latest_failed_at': None,
-        'latest_processing_at': None,
-        'recommendations': ['暂无近期风控异常，继续保持当前运行节奏'],
-    }
-
-
-def _get_int_system_setting(key: str, default: int, minimum: int, maximum: int) -> int:
-    try:
-        value = int(db_manager.get_system_setting(key) or default)
-        return max(minimum, min(value, maximum))
-    except Exception:
-        return default
-
-
-def _get_bool_system_setting(key: str, default: bool = False) -> bool:
-    value = db_manager.get_system_setting(key)
-    if value is None:
-        return default
-    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
-
-
-def _format_risk_alert_account_lines(accounts: List[Dict[str, Any]], max_items: int = 3) -> str:
-    if not accounts:
-        return '暂无集中失败账号'
-    lines = []
-    for item in accounts[:max_items]:
-        cookie_id = item.get('cookie_id') or '-'
-        failed_count = int(item.get('failed_count') or 0)
-        slider_failed_count = int(item.get('slider_failed_count') or 0)
-        lines.append(f"- {cookie_id}: 失败 {failed_count} 次，滑块失败 {slider_failed_count} 次")
-    return '\n'.join(lines)
-
-
-def _send_risk_health_alert_if_needed(user_id: int, cookie_ids: List[str], summary: Dict[str, Any]) -> None:
-    if summary.get('health_level') not in {'warning', 'critical'}:
-        return
-    if not _get_bool_system_setting('risk_health_alert_enabled', True):
-        return
-
-    cooldown_minutes = _get_int_system_setting('risk_health_alert_cooldown_minutes', 60, 5, 24 * 60)
-    now = time.time()
-    alert_key = f"{user_id}:{summary.get('health_level')}"
-    with risk_health_alert_lock:
-        last_sent_at = risk_health_alert_tracker.get(alert_key, 0)
-        if now - last_sent_at < cooldown_minutes * 60:
-            return
-        risk_health_alert_tracker[alert_key] = now
-
-    target_account_id = None
-    for cookie_id in cookie_ids:
-        try:
-            if db_manager.get_account_notifications(cookie_id):
-                target_account_id = cookie_id
-                break
-        except Exception:
-            continue
-
-    if not target_account_id:
-        logger.warning(f"用户 {user_id} 未配置账号通知渠道，跳过风控健康告警")
-        return
-
-    recommendations = summary.get('recommendations') or []
-    recommendation_text = '\n'.join([f"- {item}" for item in recommendations[:4]]) or '- 请查看风控日志'
-    message = (
-        f"⚠️ 风控健康告警：{summary.get('health_label') or '需要关注'}\n\n"
-        f"统计窗口: 近 {int(summary.get('lookback_minutes') or 0) // 60 or 1} 小时\n"
-        f"失败事件: {summary.get('failed_count', 0)}\n"
-        f"处理中: {summary.get('processing_count', 0)}\n"
-        f"保护账号: {summary.get('risk_protected_accounts', 0)}\n\n"
-        f"高风险账号:\n{_format_risk_alert_account_lines(summary.get('top_failed_accounts') or [])}\n\n"
-        f"建议:\n{recommendation_text}"
-    )
-
-    sent = dispatch_account_notifications_sync(
-        target_account_id,
-        message,
-        title='风控健康告警',
-        notification_type='risk_health_alert',
-    )
-    if sent:
-        logger.warning(f"已发送风控健康告警: user_id={user_id}, level={summary.get('health_level')}, account={target_account_id}")
-    else:
-        logger.warning(f"风控健康告警发送失败: user_id={user_id}, account={target_account_id}")
-
 async def _execute_password_login(session_id: str, account_id: str, account: str, password: str, show_browser: bool, user_id: int, current_user: Dict[str, Any]):
     """后台执行账号密码登录任务"""
     manual_refresh_acquired = False
@@ -3740,20 +3550,13 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
             from db_manager import db_manager  # 在函数开头导入，避免作用域问题
             from XianyuAutoAsync import XianyuLive
             try:
-                if is_refresh_mode:
-                    cookies_dict = slider_instance.manual_cookie_refresh_playwright(
-                        show_browser=True,
-                        notification_callback=notification_callback,
-                        force_clean_context=True
-                    )
-                else:
-                    cookies_dict = slider_instance.login_with_password_playwright(
-                        account=account,
-                        password=password,
-                        show_browser=show_browser,
-                        notification_callback=notification_callback,
-                        force_clean_context=False
-                    )
+                cookies_dict = slider_instance.login_with_password_playwright(
+                    account=account,
+                    password=password,
+                    show_browser=show_browser,
+                    notification_callback=notification_callback,
+                    force_clean_context=is_refresh_mode
+                )
                 
                 if cookies_dict is None:
                     failure_message = slider_instance.last_login_error or '登录失败，请检查账号密码是否正确'
@@ -3851,8 +3654,8 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                 update_success = db_manager.update_cookie_account_info(
                     account_id,
                     cookie_value=cookies_str,
-                    username=None if is_refresh_mode else account,
-                    password=None if is_refresh_mode else password,
+                    username=account,
+                    password=password,
                     show_browser=show_browser if not is_refresh_mode else None,  # 刷新模式不更新此字段
                     user_id=user_id  # 新账号时需要提供user_id
                 )
@@ -4076,12 +3879,12 @@ async def password_login(
         # 检查前端是否明确指定了 show_browser 参数
         show_browser_specified = 'show_browser' in request
         show_browser = request.get('show_browser', False)
-        refresh_mode = request.get('refresh_mode', False)  # 刷新模式：打开浏览器等待用户手动验证
+        refresh_mode = request.get('refresh_mode', False)  # 刷新模式：从数据库读取账密
         risk_log_id = None
 
         user_id = current_user['user_id']
 
-        # 刷新模式：只校验账号归属，不自动输入账号密码
+        # 刷新模式：从数据库读取已保存的账号密码
         if refresh_mode and account_id:
             from XianyuAutoAsync import XianyuLive
             cookie_info = db_manager.get_cookie_details(account_id)
@@ -4092,27 +3895,25 @@ async def password_login(
             if cookie_info.get('user_id') != user_id:
                 return {'success': False, 'message': '无权操作此账号'}
 
-            account = cookie_info.get('username') or account_id
-            password = cookie_info.get('password') or ''
+            account = cookie_info.get('username')
+            password = cookie_info.get('password')
 
-            # 手动刷新 Cookie 必须保留可见浏览器窗口，方便用户完成扫码/人脸验证。
-            show_browser = True
+            if not account or not password:
+                return {'success': False, 'message': '该账号未配置用户名和密码，无法刷新Cookie'}
 
-            log_with_user('info', f"手动刷新Cookie模式: {account_id}, show_browser: {show_browser}，等待用户自行选择验证方式", current_user)
+            # 获取 show_browser 设置（只有当前端没有明确指定时，才使用数据库配置）
+            if not show_browser_specified:
+                show_browser = cookie_info.get('show_browser', False)
+
+            log_with_user('info', f"刷新Cookie模式: {account_id}, 用户名: {account}, show_browser: {show_browser}", current_user)
 
             if XianyuLive.is_manual_refresh_active(account_id):
                 return {'success': False, 'message': f'账号 {account_id} 正在执行手动刷新，请稍候再试'}
 
-        if refresh_mode:
-            if not account_id:
-                return {'success': False, 'message': '账号ID不能为空'}
-        elif not account_id or not account or not password:
+        if not account_id or not account or not password:
             return {'success': False, 'message': '账号ID、登录账号和密码不能为空'}
 
-        if refresh_mode:
-            log_with_user('info', f"开始手动验证刷新Cookie: {account_id}", current_user)
-        else:
-            log_with_user('info', f"开始账号密码登录: {account_id}, 账号: {account}", current_user)
+        log_with_user('info', f"开始账号密码登录: {account_id}, 账号: {account}", current_user)
         
         # 生成会话ID
         session_id = secrets.token_urlsafe(16)
@@ -4128,7 +3929,7 @@ async def password_login(
                     session_id=risk_session_id,
                     trigger_scene='manual_password_refresh',
                     result_code='manual_cookie_refresh_started',
-                    event_description='手动触发浏览器验证Cookie刷新',
+                    event_description='手动触发账密Cookie刷新',
                     processing_status='processing',
                     event_meta=_build_risk_event_meta({
                         'account_id': account_id,
@@ -6004,10 +5805,6 @@ class AutoCommentUpdate(BaseModel):
     auto_comment: bool
 
 
-class AutoCookieRefreshUpdate(BaseModel):
-    auto_cookie_refresh: bool
-
-
 class CommentTemplateCreate(BaseModel):
     name: str
     content: str
@@ -6086,63 +5883,6 @@ def get_auto_confirm(cid: str, current_user: Dict[str, Any] = Depends(get_curren
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put("/cookies/{cid}/auto-cookie-refresh")
-def update_auto_cookie_refresh(cid: str, update_data: AutoCookieRefreshUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """更新账号的自动Cookie刷新设置"""
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
-    try:
-        cid = _ensure_cookie_access(cid, current_user)
-        enabled = bool(update_data.auto_cookie_refresh)
-
-        success = db_manager.update_auto_cookie_refresh(cid, enabled)
-        if not success:
-            raise HTTPException(status_code=500, detail="更新自动刷新Cookie设置失败")
-
-        live_instance = None
-        try:
-            from XianyuAutoAsync import XianyuLive
-            live_instance = XianyuLive.get_instance(cid)
-        except Exception:
-            live_instance = None
-
-        if live_instance is None:
-            live_instance = getattr(cookie_manager.manager, 'live_instances', {}).get(cid)
-
-        if live_instance is not None and hasattr(live_instance, 'enable_cookie_refresh'):
-            live_instance.enable_cookie_refresh(enabled)
-
-        return {
-            "msg": "success",
-            "auto_cookie_refresh": enabled,
-            "message": f"自动刷新Cookie已{'开启' if enabled else '关闭'}"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"更新自动刷新Cookie设置失败: {cid} - {mask_sensitive_text(e)}")
-        raise HTTPException(status_code=500, detail=safe_client_error("更新自动刷新Cookie设置失败，请稍后重试"))
-
-
-@app.get("/cookies/{cid}/auto-cookie-refresh")
-def get_auto_cookie_refresh(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """获取账号的自动Cookie刷新设置"""
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
-    try:
-        cid = _ensure_cookie_access(cid, current_user)
-        enabled = db_manager.get_auto_cookie_refresh(cid)
-        return {
-            "auto_cookie_refresh": enabled,
-            "message": f"自动刷新Cookie当前{'开启' if enabled else '关闭'}"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取自动刷新Cookie设置失败: {cid} - {mask_sensitive_text(e)}")
-        raise HTTPException(status_code=500, detail=safe_client_error("获取自动刷新Cookie设置失败，请稍后重试"))
 
 
 # ==================== 自动好评相关API ====================
@@ -7949,10 +7689,10 @@ class BatchDeleteRequest(BaseModel):
 
 class AIReplySettings(BaseModel):
     ai_enabled: bool
-    model_name: str = "qwen-plus"
-    api_key: str = ""
-    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    api_type: str = ""
+    model_name: str = "deepseek-chat"
+    api_key: str = "sk-3d2b3039cde244edbf4d06107c4e8c88"
+    base_url: str = "https://api.deepseek.com/v1"
+    api_type: str = "deepseek"
     max_discount_percent: int = 10
     max_discount_amount: int = 100
     max_bargain_rounds: int = 3
@@ -8325,121 +8065,6 @@ async def get_slider_verification_stats(
             'success': False,
             'message': f'获取滑块验证统计失败: {str(e)}',
             'data': _empty_slider_session_stats(),
-        }
-
-
-@app.get("/admin/risk-health-summary")
-async def get_risk_health_summary(
-    lookback_hours: int = 24,
-    admin_user: Dict[str, Any] = Depends(require_admin)
-):
-    """获取风控健康摘要，用于快速发现连续失败和账号保护状态。"""
-    try:
-        user_id = admin_user['user_id']
-        safe_hours = max(1, min(int(lookback_hours or 24), 168))
-        lookback_minutes = safe_hours * 60
-        user_cookie_ids = sorted(db_manager.get_all_cookies(user_id).keys())
-
-        summary = _empty_risk_health_summary(lookback_minutes)
-        if not user_cookie_ids:
-            summary.update({
-                'health_level': 'normal',
-                'health_label': '暂无账号',
-                'recommendations': ['当前没有可统计的账号，请先添加账号后再查看风控健康状态'],
-            })
-            return {'success': True, 'data': summary}
-
-        recent_summary = db_manager.get_recent_risk_control_failure_summary(
-            user_cookie_ids,
-            lookback_minutes=lookback_minutes,
-        )
-        disabled_accounts = 0
-        risk_protected_accounts = 0
-        for cookie_id in user_cookie_ids:
-            enabled = True
-            try:
-                if cookie_manager.manager is not None:
-                    enabled = cookie_manager.manager.get_cookie_status(cookie_id)
-                else:
-                    enabled = db_manager.get_cookie_status(cookie_id)
-            except Exception:
-                enabled = True
-
-            details = db_manager.get_cookie_details(cookie_id) or {}
-            status_note = str(details.get('status_note') or '').strip()
-            status_note_lower = status_note.lower()
-            is_risk_status_note = (
-                any(keyword in status_note for keyword in ['风控', '风险', '保护', '限制'])
-                or any(keyword in status_note_lower for keyword in ['risk', 'protect', 'limit'])
-            )
-            if not enabled:
-                disabled_accounts += 1
-            if status_note and (not enabled or is_risk_status_note):
-                risk_protected_accounts += 1
-
-        failed_count = int(recent_summary.get('failed_count') or 0)
-        processing_count = int(recent_summary.get('processing_count') or 0)
-        risk_protected_count = int(recent_summary.get('risk_protected_count') or 0)
-        slider_failed_count = int(recent_summary.get('slider_failed_count') or 0)
-        cookie_refresh_failed_count = int(recent_summary.get('cookie_refresh_failed_count') or 0)
-        accounts_with_failures = int(recent_summary.get('accounts_with_failures') or 0)
-
-        health_level = 'normal'
-        health_label = '运行平稳'
-        recommendations = []
-
-        if risk_protected_accounts > 0 or risk_protected_count > 0:
-            health_level = 'critical'
-            health_label = '账号保护中'
-            recommendations.append('已有账号进入风控保护，请先到闲鱼客户端按提示完成处理，再手动启用账号')
-        elif failed_count >= 6 or accounts_with_failures >= 3:
-            health_level = 'warning'
-            health_label = '近期失败偏多'
-            recommendations.append('近段时间风控失败较多，建议暂停自动刷新一段时间并优先检查失败最多的账号')
-        elif processing_count >= 3:
-            health_level = 'attention'
-            health_label = '存在处理中积压'
-            recommendations.append('有多条风控事件仍在处理中，建议确认浏览器验证窗口或后台任务是否卡住')
-        elif failed_count > 0:
-            health_level = 'attention'
-            health_label = '存在少量失败'
-            recommendations.append('近期存在少量风控失败，请关注是否集中在同一账号或同一场景')
-
-        if slider_failed_count > 0:
-            recommendations.append('滑块失败时优先使用手动刷新或客户端处理，避免短时间多次自动重试')
-        if cookie_refresh_failed_count > 0:
-            recommendations.append('Cookie刷新失败时请检查账号密码、验证码状态和浏览器验证是否完成')
-        if disabled_accounts > 0 and risk_protected_accounts == 0:
-            recommendations.append('有账号处于禁用状态，若非风控保护可按需手动启用')
-        if not recommendations:
-            recommendations.append('暂无近期风控异常，继续保持当前运行节奏')
-
-        summary.update(recent_summary)
-        summary.update({
-            'health_level': health_level,
-            'health_label': health_label,
-            'disabled_accounts': disabled_accounts,
-            'risk_protected_accounts': risk_protected_accounts,
-            'recommendations': recommendations[:4],
-            'alert_enabled': _get_bool_system_setting('risk_health_alert_enabled', True),
-            'alert_cooldown_minutes': _get_int_system_setting('risk_health_alert_cooldown_minutes', 60, 5, 24 * 60),
-            'auth_throttle_window_minutes': _get_int_system_setting('risk_auth_throttle_window_minutes', 30, 5, 24 * 60),
-            'auth_throttle_failure_threshold': _get_int_system_setting('risk_auth_throttle_failure_threshold', 3, 1, 20),
-        })
-        _send_risk_health_alert_if_needed(user_id, user_cookie_ids, summary)
-
-        log_with_user(
-            'info',
-            f"获取风控健康摘要成功: level={health_level}, failed={failed_count}, processing={processing_count}, protected={risk_protected_accounts}",
-            admin_user,
-        )
-        return {'success': True, 'data': summary}
-    except Exception as e:
-        log_with_user('error', f"获取风控健康摘要失败: {str(e)}", admin_user)
-        return {
-            'success': False,
-            'message': f'获取风控健康摘要失败: {str(e)}',
-            'data': _empty_risk_health_summary(),
         }
 
 
@@ -11389,6 +11014,191 @@ async def scheduled_task_checker():
         except Exception as e:
             logger.error(f"定时任务检查异常: {str(e)}")
         await asyncio.sleep(60)
+
+
+# ========================= 飞书聊一聊配置接口 =========================
+
+class FeishuBargainConfig(BaseModel):
+    app_id: str = ""
+    app_secret: str = ""
+    encrypt_key: str = ""
+    bargain_account: str = ""
+    default_bargain_text: str = ""
+    bargain_enabled: bool = False
+
+
+@app.get("/api/feishu/bargain-config")
+async def get_feishu_bargain_config(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取飞书聊一聊配置"""
+    try:
+        config = {}
+        for key in ['app_id', 'app_secret', 'encrypt_key', 'bargain_account', 'default_bargain_text']:
+            config[key] = db_manager.get_system_setting(f'feishu_{key}') or ''
+        config['bargain_enabled'] = db_manager.get_system_setting('feishu_bargain_enabled') == 'true'
+        
+        # 敏感信息脱敏
+        if config.get('app_secret'):
+            config['app_secret'] = config['app_secret'][:4] + '****' + config['app_secret'][-4:] if len(config['app_secret']) > 8 else '****'
+        if config.get('encrypt_key'):
+            config['encrypt_key'] = config['encrypt_key'][:4] + '****' + config['encrypt_key'][-4:] if len(config['encrypt_key']) > 8 else '****'
+        
+        return {"success": True, "config": config}
+    except Exception as e:
+        logger.error(f"获取飞书配置失败: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/feishu/bargain-config")
+async def save_feishu_bargain_config(
+    config_data: FeishuBargainConfig,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """保存飞书聊一聊配置"""
+    try:
+        db_manager.set_system_setting('feishu_app_id', config_data.app_id, '飞书应用App ID')
+        db_manager.set_system_setting('feishu_app_secret', config_data.app_secret, '飞书应用App Secret')
+        db_manager.set_system_setting('feishu_encrypt_key', config_data.encrypt_key, '飞书加密密钥')
+        db_manager.set_system_setting('feishu_bargain_account', config_data.bargain_account, '飞书议价默认账号')
+        db_manager.set_system_setting('feishu_default_bargain_text', config_data.default_bargain_text, '飞书默认议价文案')
+        db_manager.set_system_setting('feishu_bargain_enabled', 'true' if config_data.bargain_enabled else 'false', '飞书议价功能开关')
+        
+        return {"success": True, "message": "配置保存成功"}
+    except Exception as e:
+        logger.error(f"保存飞书配置失败: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/feishu/test-connection")
+async def test_feishu_connection(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """测试飞书连接"""
+    try:
+        import aiohttp
+        
+        # 获取配置
+        app_id = db_manager.get_system_setting('feishu_app_id') or ''
+        app_secret = db_manager.get_system_setting('feishu_app_secret') or ''
+        
+        if not app_id or not app_secret:
+            return {"success": False, "message": "请先配置 App ID 和 App Secret"}
+        
+        # 获取 tenant_access_token
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/",
+                json={"app_id": app_id, "app_secret": app_secret},
+                headers={"Content-Type": "application/json"}
+            ) as resp:
+                result = await resp.json()
+                
+                if result.get("code") == 0:
+                    return {"success": True, "message": "连接测试成功"}
+                else:
+                    error_msg = result.get("msg", "未知错误")
+                    return {"success": False, "message": f"连接测试失败: {error_msg}"}
+                    
+    except Exception as e:
+        logger.error(f"飞书连接测试失败: {e}")
+        return {"success": False, "message": f"连接测试失败: {str(e)}"}
+
+
+async def _handle_feishu_bargain_webhook(request: Request):
+    """处理飞书事件回调，并调度议价账号发送消息。"""
+    try:
+        body = await request.body()
+        headers = dict(request.headers)
+
+        from utils.feishu_event_handler import (
+            handle_feishu_callback,
+            reply_to_feishu_message,
+            run_bargain_on_instance,
+        )
+
+        config = {
+            'app_id': db_manager.get_system_setting('feishu_app_id') or '',
+            'app_secret': db_manager.get_system_setting('feishu_app_secret') or '',
+            'encrypt_key': db_manager.get_system_setting('feishu_encrypt_key') or '',
+            'bargain_account': db_manager.get_system_setting('feishu_bargain_account') or '',
+            'default_bargain_text': db_manager.get_system_setting('feishu_default_bargain_text') or '老板你好！请问这个还在吗？',
+        }
+
+        callback_action = await handle_feishu_callback(body, headers, config)
+
+        if callback_action.get('action') == 'challenge':
+            return {"challenge": callback_action.get('challenge', '')}
+
+        # 检查功能是否启用
+        enabled = db_manager.get_system_setting('feishu_bargain_enabled') == 'true'
+        if not enabled:
+            return JSONResponse({"code": 0}, status_code=200)
+
+        if callback_action.get('action') == 'reply':
+            if config['app_id'] and config['app_secret'] and callback_action.get('message_id'):
+                await reply_to_feishu_message(
+                    config['app_id'],
+                    config['app_secret'],
+                    callback_action.get('message_id'),
+                    callback_action.get('text', ''),
+                )
+            return JSONResponse({"code": 0}, status_code=200)
+
+        if callback_action.get('action') == 'bargain':
+            account_id = config.get('bargain_account') or ''
+            if not account_id:
+                result_message = "未配置议价账号，请先在系统设置里选择一个闲鱼账号"
+            elif not cookie_manager.manager:
+                result_message = "CookieManager 未就绪，请确认服务已正常启动"
+            else:
+                instance = cookie_manager.manager.get_xianyu_instance(account_id)
+                if not instance:
+                    result_message = f"议价账号 {account_id} 未运行，请先在账号管理中启用该账号"
+                else:
+                    try:
+                        success, result_message = await _run_live_instance_on_manager_loop(
+                            account_id,
+                            lambda: run_bargain_on_instance(
+                                instance,
+                                config,
+                                callback_action.get('text', ''),
+                                callback_action.get('message_id', ''),
+                                callback_action.get('sender_id', ''),
+                            ),
+                            timeout=90,
+                        )
+                    except HTTPException as e:
+                        success = False
+                        result_message = str(e.detail)
+                    except Exception as e:
+                        success = False
+                        result_message = f"议价处理异常: {str(e)}"
+
+                    if not success:
+                        logger.warning(f"飞书议价失败: {result_message}")
+
+            if config['app_id'] and config['app_secret'] and callback_action.get('message_id'):
+                await reply_to_feishu_message(
+                    config['app_id'],
+                    config['app_secret'],
+                    callback_action.get('message_id'),
+                    result_message,
+                )
+
+        return JSONResponse({"code": 0}, status_code=200)
+
+    except Exception as e:
+        logger.error(f"处理飞书事件失败: {e}")
+        return JSONResponse({"code": 0}, status_code=200)
+
+
+@app.post("/feishu/event")
+async def handle_feishu_event(request: Request):
+    """处理飞书事件回调。"""
+    return await _handle_feishu_bargain_webhook(request)
+
+
+@app.post("/feishu/webhook")
+async def handle_feishu_webhook(request: Request):
+    """兼容前端和文档展示的飞书 Webhook 地址。"""
+    return await _handle_feishu_bargain_webhook(request)
 
 
 # 移除自动启动，由Start.py或手动启动

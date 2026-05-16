@@ -9,12 +9,22 @@ AI回复引擎模块 - 统一意图识别与回复生成
 """
 
 import json
+import os
 import time
 import requests
 import threading
 from typing import List, Dict, Optional
 from loguru import logger
 from db_manager import db_manager
+
+# Prompt文件目录（自动解析到 ai_reply_engine.py 同级目录下的 prompts 文件夹）
+PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'prompts')
+
+
+def load_prompt(file_path: str) -> str:
+    """读取提示词文件内容"""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return f.read()
 
 
 class AIReplyEngine:
@@ -46,6 +56,46 @@ class AIReplyEngine:
 如果客户明确询问退款，回复："虚拟产品，一旦发出是不可以退款的"'''
         }
     
+    def classify_user_intent(self, user_message: str, settings: dict) -> str:
+        """分类用户消息意图，返回 price / tech / no_reply / default"""
+        try:
+            classify_prompt = load_prompt(os.path.join(PROMPT_DIR, 'classify_prompt.txt'))
+            messages = [
+                {"role": "system", "content": classify_prompt},
+                {"role": "user", "content": user_message}
+            ]
+            api_type = self._resolve_api_type(settings)
+            logger.info(f"【意图分类】使用 {api_type} API 对消息分类: {user_message[:30]}...")
+
+            if api_type == 'dashscope':
+                if self._is_dashscope_app_api(settings):
+                    result = self._call_dashscope_api(settings, messages, max_tokens=10, temperature=0.1)
+                else:
+                    result = self._call_openai_chat_api(settings, messages, max_tokens=10, temperature=0.1)
+            elif api_type == 'gemini':
+                result = self._call_gemini_api(settings, messages, max_tokens=10, temperature=0.1)
+            elif api_type == 'openai_responses':
+                result = self._call_openai_responses_api(settings, messages, max_tokens=10, temperature=0.1)
+            elif api_type == 'anthropic':
+                result = self._call_anthropic_api(settings, messages, max_tokens=10, temperature=0.1)
+            elif api_type == 'azure_openai':
+                result = self._call_azure_openai_api(settings, messages, max_tokens=10, temperature=0.1)
+            else:
+                result = self._call_openai_chat_api(settings, messages, max_tokens=10, temperature=0.1)
+
+            result_lower = result.strip().lower()
+            valid_intents = ['price', 'tech', 'no_reply', 'default']
+            for intent in valid_intents:
+                if intent in result_lower:
+                    logger.info(f"【意图分类】结果: {intent} (原始返回: {result})")
+                    return intent
+
+            logger.warning(f"【意图分类】无法解析意图，原始返回: {result}，回退为 default")
+            return 'default'
+        except Exception as e:
+            logger.error(f"【意图分类】异常: {e}，回退为 default")
+            return 'default'
+
     def _resolve_api_type(self, settings: dict) -> str:
         """根据设置解析实际的API类型（支持显式设置和自动检测）"""
         api_type = (settings.get('api_type') or '').strip()
@@ -392,7 +442,7 @@ class AIReplyEngine:
     
     def generate_reply(self, message: str, item_info: dict, chat_id: str,
                       cookie_id: str, user_id: str, item_id: str,
-                      skip_wait: bool = False) -> Optional[str]:
+                      skip_wait: bool = False, system_prompt_override: Optional[str] = None) -> Optional[str]:
         """
         生成AI回复 - 统一意图识别与回复生成
         AI会自动判断用户意图并生成合适的回复，避免关键词误判
@@ -440,8 +490,11 @@ class AIReplyEngine:
                 max_discount_percent = settings.get('max_discount_percent', 10)
                 max_discount_amount = settings.get('max_discount_amount', 100)
 
-                # 4. 构建统一的系统提示词（整合意图判断和回复生成）
-                system_prompt = self._build_unified_system_prompt(custom_prompts, settings)
+                # 4. 构建系统提示词（支持外部覆盖，否则使用统一提示词）
+                if system_prompt_override:
+                    system_prompt = system_prompt_override
+                else:
+                    system_prompt = self._build_unified_system_prompt(custom_prompts, settings)
 
                 # 5. 构建商品信息
                 item_desc = f"商品标题: {item_info.get('title', '未知')}\n"
@@ -521,14 +574,14 @@ class AIReplyEngine:
 
     async def generate_reply_async(self, message: str, item_info: dict, chat_id: str,
                                    cookie_id: str, user_id: str, item_id: str,
-                                   skip_wait: bool = False) -> Optional[str]:
+                                   skip_wait: bool = False, system_prompt_override: Optional[str] = None) -> Optional[str]:
         """
         异步包装器：在独立线程池中执行同步的 `generate_reply`，并返回结果。
         这样可以在异步代码中直接 await，而不阻塞事件循环。
         """
         try:
             import asyncio as _asyncio
-            return await _asyncio.to_thread(self.generate_reply, message, item_info, chat_id, cookie_id, user_id, item_id, skip_wait)
+            return await _asyncio.to_thread(self.generate_reply, message, item_info, chat_id, cookie_id, user_id, item_id, skip_wait, system_prompt_override)
         except Exception as e:
             logger.error(f"异步生成回复失败: {e}")
             return None

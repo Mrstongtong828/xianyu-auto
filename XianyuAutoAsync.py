@@ -61,26 +61,6 @@ REQUIRED_SESSION_COOKIE_FIELDS = (
     'cna',
 )
 
-AUTO_REPLY_RISK_REPLACEMENTS = (
-    (re.compile(r'喜欢\s*直接\s*拍'), '有问题可以问我'),
-    (re.compile(r'直接\s*(拍|下单|付款|购买|买)'), '可以看看详情'),
-    (re.compile(r'(拍下|下单|买下|购买)了?之后'), '需要后'),
-    (re.compile(r'(拍下|下单|买下|购买)'), '看看详情'),
-    (re.compile(r'绝对(值得信赖|靠谱|放心)'), '可以放心了解'),
-    (re.compile(r'三十天内有任何问题'), '后续有问题'),
-    (re.compile(r'如果.*?(联系我售后|售后).*'), '后续有问题可以联系我。'),
-)
-AUTO_REPLY_RISK_WORDS = ('宝子', '诱导', '站外', '微信', 'QQ', 'vx', 'V信', '加我')
-PLATFORM_MESSAGE_PUNISHMENT_MARKERS = (
-    'PunishOneDay',
-    'onedaypunishment',
-    '安全-1天禁言',
-    '暂时无法发消息',
-    '限制发送消息',
-    '无法发消息',
-    '被限制发送消息',
-)
-
 # 滑块验证补丁已废弃，使用集成的 Playwright 登录方法
 # 不再需要猴子补丁，所有功能已集成到 XianyuSliderStealth 类中
 
@@ -163,8 +143,6 @@ class AutoReplyPauseManager:
     def __init__(self):
         # 存储每个chat_id的暂停信息 {chat_id: pause_until_timestamp}
         self.paused_chats = {}
-        # 存储账号级暂停信息 {cookie_id: pause_until_timestamp}
-        self.paused_accounts = {}
 
     def pause_chat(self, chat_id: str, cookie_id: str):
         """暂停指定chat_id的自动回复，使用账号特定的暂停时间"""
@@ -188,41 +166,6 @@ class AutoReplyPauseManager:
         # 计算暂停结束时间
         end_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pause_until))
         logger.info(f"【{cookie_id}】检测到手动发出消息，chat_id {chat_id} 自动回复暂停{pause_minutes}分钟，恢复时间: {end_time}")
-
-    def pause_account(self, cookie_id: str, minutes: int, reason: str = ""):
-        """暂停整个账号的自动回复，用于平台处罚或风控提示。"""
-        if not cookie_id or minutes <= 0:
-            return
-
-        pause_until = time.time() + minutes * 60
-        current_until = self.paused_accounts.get(cookie_id, 0)
-        if pause_until <= current_until:
-            return
-
-        self.paused_accounts[cookie_id] = pause_until
-        end_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pause_until))
-        reason_text = f"，原因: {reason}" if reason else ""
-        logger.warning(f"【{cookie_id}】账号自动回复已暂停{minutes}分钟，恢复时间: {end_time}{reason_text}")
-
-    def is_account_paused(self, cookie_id: str) -> bool:
-        """检查账号级自动回复是否暂停。"""
-        if cookie_id not in self.paused_accounts:
-            return False
-
-        current_time = time.time()
-        pause_until = self.paused_accounts[cookie_id]
-        if current_time >= pause_until:
-            del self.paused_accounts[cookie_id]
-            return False
-
-        return True
-
-    def get_remaining_account_pause_time(self, cookie_id: str) -> int:
-        """获取账号级自动回复剩余暂停时间（秒）。"""
-        pause_until = self.paused_accounts.get(cookie_id)
-        if not pause_until:
-            return 0
-        return max(0, int(pause_until - time.time()))
 
     def is_chat_paused(self, chat_id: str) -> bool:
         """检查指定chat_id是否处于暂停状态"""
@@ -255,13 +198,9 @@ class AutoReplyPauseManager:
         current_time = time.time()
         expired_chats = [chat_id for chat_id, pause_until in self.paused_chats.items()
                         if current_time >= pause_until]
-        expired_accounts = [cookie_id for cookie_id, pause_until in self.paused_accounts.items()
-                            if current_time >= pause_until]
 
         for chat_id in expired_chats:
             del self.paused_chats[chat_id]
-        for cookie_id in expired_accounts:
-            del self.paused_accounts[cookie_id]
 
 
 # 全局暂停管理器实例
@@ -711,8 +650,6 @@ class XianyuLive:
         message = (error_message or "").lower()
         if any(keyword in message for keyword in ["账号密码错误", "账密错误", "用户名或密码错误", "密码错误"]):
             return "credentials", 1800
-        if any(keyword in message for keyword in ["风控恢复失败较多", "暂停自动重试", "risk_recovery_throttled"]):
-            return "risk_recovery_throttled", 1800
         if any(keyword in message for keyword in ["前置滑块", "风控", "拦截", "框体错误", "点击框体重试", "账号存在风险", "闲鱼客户端登录"]):
             return "risk_control", 900
         if any(keyword in message for keyword in ["滑块验证失败", "未找到滑块容器"]):
@@ -1674,15 +1611,6 @@ class XianyuLive:
         self.notification_lock = asyncio.Lock()  # 通知防重复机制的异步锁
         self.pending_notification_keys = set()  # 记录发送中的通知，避免并发重复发送
 
-        # 自动回复发送保护：降低连续、重复、促成交话术触发平台风控的概率
-        self.auto_reply_send_lock = asyncio.Lock()
-        self.last_auto_reply_sent_at = 0.0
-        self.auto_reply_min_send_interval = 12
-        self.auto_reply_chat_cooldown = 45
-        self.last_auto_reply_by_chat = {}
-        self.recent_auto_reply_hashes = deque(maxlen=50)
-        self.last_platform_punishment_at = 0.0
-
         # 自动发货防重复机制
         self.last_delivery_time = {}  # 记录每个商品的最后发货时间
         self.delivery_cooldown = 600  # 10分钟内不重复发货
@@ -1709,7 +1637,7 @@ class XianyuLive:
         self.cookie_refresh_interval = 10800  # 3小时 = 10800秒
         self.last_cookie_refresh_time = 0
         self.cookie_refresh_lock = asyncio.Lock()  # 使用Lock防止重复执行Cookie刷新
-        self.cookie_refresh_enabled = db_manager.get_auto_cookie_refresh(cookie_id)  # 是否启用Cookie刷新功能
+        self.cookie_refresh_enabled = True  # 是否启用Cookie刷新功能
 
         # 扫码登录Cookie刷新标志
         self.last_qr_cookie_refresh_time = 0  # 记录上次扫码登录Cookie刷新时间
@@ -3936,109 +3864,6 @@ class XianyuLive:
             'card_title': card_title,
             'texts': texts,
         }
-
-    def _message_contains_platform_punishment(self, message: Any, route_info: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
-        """识别平台发来的禁言/限制发送提示。"""
-        texts = []
-        if route_info:
-            texts.extend(route_info.get('texts') or [])
-            for key in ('task_name', 'button_text', 'card_title'):
-                value = route_info.get(key)
-                if value:
-                    texts.append(value)
-
-        try:
-            message_text = json.dumps(message, ensure_ascii=False)
-            texts.append(message_text)
-        except Exception:
-            texts.append(str(message))
-
-        combined = '\n'.join(str(text) for text in texts if text)
-        for marker in PLATFORM_MESSAGE_PUNISHMENT_MARKERS:
-            if marker in combined:
-                return True, marker
-        return False, ''
-
-    def _handle_platform_punishment_notice(self, chat_id: str, route_info: Dict[str, Any], message: Any, msg_id: str) -> bool:
-        """平台明确提示处罚时，暂停账号级自动回复。"""
-        matched, marker = self._message_contains_platform_punishment(message, route_info)
-        if not matched:
-            return False
-
-        now = time.time()
-        self.last_platform_punishment_at = now
-        pause_manager.pause_account(self.cookie_id, 24 * 60 + 10, f"平台提示: {marker}")
-        if chat_id:
-            pause_manager.paused_chats[chat_id] = max(
-                pause_manager.paused_chats.get(chat_id, 0),
-                now + (24 * 60 + 10) * 60
-            )
-        try:
-            db_manager.update_cookie_status_note(self.cookie_id, "平台限制发消息，自动回复已暂停24小时")
-        except Exception as e:
-            logger.warning(f"【{self.cookie_id}】更新平台处罚状态文案失败: {self._safe_str(e)}")
-
-        logger.warning(
-            f"【{self.cookie_id}】[{msg_id}] 检测到平台发消息限制({marker})，已暂停账号自动回复24小时"
-        )
-        return True
-
-    def _sanitize_auto_reply_text(self, reply: str, *, source: str = '') -> str:
-        """把自动回复中的高风险促成交/站外词改成更中性的客服表达。"""
-        if not isinstance(reply, str):
-            return reply
-
-        sanitized = reply.strip()
-        original = sanitized
-        for pattern, replacement in AUTO_REPLY_RISK_REPLACEMENTS:
-            sanitized = pattern.sub(replacement, sanitized)
-
-        for word in AUTO_REPLY_RISK_WORDS:
-            sanitized = sanitized.replace(word, '')
-
-        sanitized = re.sub(r'[，,、]\s*[，,、]+', '，', sanitized)
-        sanitized = re.sub(r'\s+', ' ', sanitized).strip(' ，,。~～')
-        sanitized = sanitized.replace('，，', '，')
-        if not sanitized:
-            sanitized = '在的，可以看下详情。'
-
-        if sanitized != original:
-            logger.warning(f"【{self.cookie_id}】{source}自动回复话术已净化: {original} -> {sanitized}")
-        return sanitized
-
-    async def _wait_before_auto_reply_send(self, chat_id: str, reply: str) -> bool:
-        """自动回复发送前节流和重复抑制。"""
-        async with self.auto_reply_send_lock:
-            now = time.time()
-            if pause_manager.is_account_paused(self.cookie_id):
-                remaining = pause_manager.get_remaining_account_pause_time(self.cookie_id)
-                logger.warning(f"【{self.cookie_id}】账号自动回复暂停中，剩余 {remaining} 秒，跳过发送")
-                return False
-
-            last_chat_time = self.last_auto_reply_by_chat.get(chat_id, 0)
-            if now - last_chat_time < self.auto_reply_chat_cooldown:
-                remaining = int(self.auto_reply_chat_cooldown - (now - last_chat_time))
-                logger.warning(f"【{self.cookie_id}】chat_id {chat_id} 自动回复冷却中，剩余 {remaining} 秒，跳过发送")
-                return False
-
-            reply_hash = hashlib.sha256(f"{chat_id}|{reply}".encode('utf-8')).hexdigest()
-            recent_hashes = {item[0] for item in self.recent_auto_reply_hashes if now - item[1] < 600}
-            if reply_hash in recent_hashes:
-                logger.warning(f"【{self.cookie_id}】chat_id {chat_id} 10分钟内已有相同自动回复，跳过重复发送")
-                return False
-
-            wait_seconds = self.auto_reply_min_send_interval - (now - self.last_auto_reply_sent_at)
-            if wait_seconds > 0:
-                jitter = random.uniform(1.0, 3.0)
-                total_wait = wait_seconds + jitter
-                logger.info(f"【{self.cookie_id}】自动回复全局节流，等待 {total_wait:.1f} 秒后发送")
-                await asyncio.sleep(total_wait)
-                now = time.time()
-
-            self.last_auto_reply_sent_at = now
-            self.last_auto_reply_by_chat[chat_id] = now
-            self.recent_auto_reply_hashes.append((reply_hash, now))
-            return True
 
     def _is_auto_delivery_trigger(self, message: str) -> bool:
         """检查消息是否为自动发货触发关键字"""
@@ -6853,27 +6678,6 @@ class XianyuLive:
         except Exception as log_e:
             logger.error(f"【{self.cookie_id}】记录风控日志失败: {log_e}")
 
-        manual_refresh_scenes = {"manual_password_refresh", "manual_qr_refresh"}
-        if not self.cookie_refresh_enabled and trigger_scene not in manual_refresh_scenes:
-            self.last_token_refresh_status = "auto_cookie_refresh_disabled"
-            self.last_token_refresh_error_message = "已关闭自动刷新Cookie，跳过自动密码登录补救"
-            logger.warning(
-                f"【{self.cookie_id}】自动Cookie刷新已关闭，跳过自动密码登录补救"
-                f"（trigger_scene={trigger_scene}, reason={trigger_reason}）"
-            )
-            if refresh_risk_log_id:
-                self._update_risk_log(
-                    refresh_risk_log_id,
-                    session_id=risk_session_id,
-                    trigger_scene=trigger_scene,
-                    result_code='auto_cookie_refresh_disabled',
-                    processing_status='failed',
-                    error_message='已关闭自动刷新Cookie，自动密码登录补救已跳过',
-                    duration_ms=max(0, int((time.time() - risk_log_started_at) * 1000)),
-                    event_meta=self._build_risk_event_meta(trigger_scene=trigger_scene, extra=base_event_meta),
-                )
-            return False
-
         if self.is_manual_refresh_active(self.cookie_id, allow_handoff_recovery=True):
             logger.warning(f"【{self.cookie_id}】手动刷新进行中，跳过自动密码登录刷新")
             if refresh_risk_log_id:
@@ -6888,50 +6692,6 @@ class XianyuLive:
                     event_meta=self._build_risk_event_meta(trigger_scene=trigger_scene, extra=base_event_meta),
                 )
             return False
-
-        if trigger_scene not in manual_refresh_scenes:
-            def _get_int_setting(key: str, default: int, minimum: int, maximum: int) -> int:
-                try:
-                    value = int(db_manager.get_system_setting(key) or default)
-                    return max(minimum, min(value, maximum))
-                except Exception:
-                    return default
-
-            throttle_window_minutes = _get_int_setting('risk_auth_throttle_window_minutes', 30, 5, 24 * 60)
-            throttle_failure_threshold = _get_int_setting('risk_auth_throttle_failure_threshold', 3, 1, 20)
-            throttle_state = db_manager.should_throttle_auth_recovery(
-                self.cookie_id,
-                lookback_minutes=throttle_window_minutes,
-                failure_threshold=throttle_failure_threshold,
-            )
-            if throttle_state.get('should_throttle'):
-                throttle_reason = throttle_state.get('reason') or "近期风控恢复失败较多，暂停自动重试"
-                self.last_token_refresh_status = "risk_recovery_throttled"
-                self.last_token_refresh_error_message = throttle_reason
-                XianyuLive.set_password_login_failure_backoff(
-                    self.cookie_id,
-                    "risk_recovery_throttled",
-                    max(1800, throttle_window_minutes * 60),
-                )
-                logger.warning(
-                    f"【{self.cookie_id}】触发风控恢复熔断: {throttle_reason}; "
-                    f"failures={throttle_state.get('failure_count')}, window={throttle_state.get('lookback_minutes')}min"
-                )
-                if refresh_risk_log_id:
-                    self._update_risk_log(
-                        refresh_risk_log_id,
-                        session_id=risk_session_id,
-                        trigger_scene=trigger_scene,
-                        result_code='risk_recovery_throttled',
-                        processing_status='failed',
-                        error_message=throttle_reason[:200],
-                        duration_ms=max(0, int((time.time() - risk_log_started_at) * 1000)),
-                        event_meta=self._build_risk_event_meta(
-                            trigger_scene=trigger_scene,
-                            extra={**base_event_meta, 'throttle_state': throttle_state},
-                        ),
-                    )
-                return False
 
         recovery_lock_owner = f"{self.cookie_id}:{trigger_scene or 'auto_cookie_refresh'}:{int(time.time() * 1000)}"
         recovery_lock_acquired = False
@@ -7060,9 +6820,7 @@ class XianyuLive:
             
             username = account_info.get('username', '')
             password = account_info.get('password', '')
-            # 自动账密刷新也需要保留可见浏览器。若闲鱼在扫码后继续要求人脸/短信验证，
-            # 用户必须能在同一个浏览器窗口里完成，流程会等待验证结束后再获取 Cookie。
-            show_browser = True
+            show_browser = account_info.get('show_browser', False)
             
             # 检查是否配置了用户名和密码
             if not username or not password:
@@ -7092,20 +6850,13 @@ class XianyuLive:
             logger.info(f"【{self.cookie_id}】使用账号: {username}")
             
             # 创建一个通知回调包装函数，支持接收截图路径和验证链接
-            async def notification_callback_wrapper(
-                message: str,
-                screenshot_path: str = None,
-                verification_url: str = None,
-                screenshot_path_new: str = None,
-                verification_type: str = None,
-            ):
+            async def notification_callback_wrapper(message: str, screenshot_path: str = None, verification_url: str = None):
                 """通知回调包装函数，支持接收截图路径和验证链接"""
-                actual_screenshot_path = screenshot_path_new or screenshot_path
                 await self.send_token_refresh_notification(
                     error_message=message,
                     notification_type="token_refresh",
                     chat_id=None,
-                    attachment_path=actual_screenshot_path,
+                    attachment_path=screenshot_path,
                     verification_url=verification_url
                 )
             
@@ -8371,12 +8122,11 @@ class XianyuLive:
                     send_message=send_message,
                     item_id=item_id
                 )
-                formatted_reply = self._sanitize_auto_reply_text(formatted_reply, source='指定商品')
                 logger.info(f"【{self.cookie_id}】指定商品回复内容: {formatted_reply}")
                 return formatted_reply
             except Exception as format_error:
                 logger.error(f"指定商品回复变量替换失败: {self._safe_str(format_error)}")
-                return self._sanitize_auto_reply_text(reply_content, source='指定商品')
+                return reply_content
 
         except Exception as e:
             logger.error(f"获取指定商品回复失败: {self._safe_str(e)}")
@@ -8413,7 +8163,6 @@ class XianyuLive:
                     send_user_id=send_user_id,
                     send_message=send_message
                 )
-                formatted_reply = self._sanitize_auto_reply_text(formatted_reply, source='默认')
 
                 # 如果开启了"只回复一次"功能，记录这次回复
                 if default_reply_settings.get('reply_once', False) and chat_id:
@@ -8425,7 +8174,7 @@ class XianyuLive:
             except Exception as format_error:
                 logger.error(f"默认回复变量替换失败: {self._safe_str(format_error)}")
                 # 如果变量替换失败，返回原始内容
-                return self._sanitize_auto_reply_text(reply_content, source='默认')
+                return reply_content
 
         except Exception as e:
             logger.error(f"获取默认回复失败: {self._safe_str(e)}")
@@ -8472,13 +8221,12 @@ class XianyuLive:
                                     send_user_id=send_user_id,
                                     send_message=send_message
                                 )
-                                formatted_reply = self._sanitize_auto_reply_text(formatted_reply, source='商品ID关键词')
                                 logger.info(f"商品ID文本关键词回复: {formatted_reply}")
                                 return formatted_reply
                             except Exception as format_error:
                                 logger.error(f"关键词回复变量替换失败: {self._safe_str(format_error)}")
                                 # 如果变量替换失败，返回原始内容
-                                return self._sanitize_auto_reply_text(reply, source='商品ID关键词')
+                                return reply
 
             # 2. 如果商品ID匹配失败或没有商品ID，匹配没有商品ID的通用关键词
             for keyword_data in keywords:
@@ -8508,13 +8256,12 @@ class XianyuLive:
                                 send_user_id=send_user_id,
                                 send_message=send_message
                             )
-                            formatted_reply = self._sanitize_auto_reply_text(formatted_reply, source='通用关键词')
                             logger.info(f"通用文本关键词回复: {formatted_reply}")
                             return formatted_reply
                         except Exception as format_error:
                             logger.error(f"关键词回复变量替换失败: {self._safe_str(format_error)}")
                             # 如果变量替换失败，返回原始内容
-                            return self._sanitize_auto_reply_text(reply, source='通用关键词')
+                            return reply
 
             logger.warning(f"未找到匹配的关键词: {send_message}")
             return None
@@ -8621,37 +8368,58 @@ class XianyuLive:
             logger.error(f"更新卡券图片URL失败: {e}")
 
     async def get_ai_reply(self, send_user_name: str, send_user_id: str, send_message: str, item_id: str, chat_id: str):
-        """获取AI回复"""
+        """获取AI回复（兜底逻辑：意图分类 + 动态Prompt加载）"""
         try:
-            from ai_reply_engine import ai_reply_engine
+            from ai_reply_engine import ai_reply_engine, load_prompt, PROMPT_DIR
 
             # 检查是否启用AI回复
             if not ai_reply_engine.is_ai_enabled(self.cookie_id):
                 logger.warning(f"账号 {self.cookie_id} 未启用AI回复")
                 return None
 
-            # 从数据库获取商品信息
+            logger.info(f"【{self.cookie_id}】关键词均未命中，触发AI兜底回复")
+
+            # 获取AI设置（用于分类和回复的API调用）
             from db_manager import db_manager
+            settings = db_manager.get_ai_reply_settings(self.cookie_id)
+
+            # 从数据库获取商品信息
             item_info_raw = db_manager.get_item_info(self.cookie_id, item_id)
 
             if not item_info_raw:
                 logger.warning(f"数据库中无商品信息: {item_id}")
-                # 使用默认商品信息
                 item_info = {
                     'title': '商品信息获取失败',
                     'price': 0,
                     'desc': '暂无商品描述'
                 }
             else:
-                # 解析数据库中的商品信息
                 item_info = {
                     'title': item_info_raw.get('item_title', '未知商品'),
                     'price': self._parse_price(item_info_raw.get('item_price', '0')),
                     'desc': item_info_raw.get('item_detail', '暂无商品描述')
                 }
 
-            # 生成AI回复
-            # 由于外部已实现防抖机制，跳过内部等待（skip_wait=True）
+            # Step 1: 意图分类
+            intent = ai_reply_engine.classify_user_intent(send_message, settings)
+
+            # Step 2: 处理 no_reply 意图（丢弃消息）
+            if intent == 'no_reply':
+                logger.info(f"【{self.cookie_id}】AI意图为 no_reply，丢弃消息不作回复")
+                return None
+
+            # Step 3: 根据意图加载对应的 Prompt
+            if intent == 'price':
+                system_prompt = load_prompt(os.path.join(PROMPT_DIR, 'price_prompt.txt'))
+                logger.info(f"【{self.cookie_id}】AI路由 → price_prompt")
+            elif intent == 'tech':
+                system_prompt = load_prompt(os.path.join(PROMPT_DIR, 'tech_prompt.txt'))
+                logger.info(f"【{self.cookie_id}】AI路由 → tech_prompt")
+            else:
+                system_prompt = load_prompt(os.path.join(PROMPT_DIR, 'default_prompt.txt'))
+                logger.info(f"【{self.cookie_id}】AI路由 → default_prompt")
+
+            # Step 4: 使用选中的 Prompt 生成回复
             reply = ai_reply_engine.generate_reply(
                 message=send_message,
                 item_info=item_info,
@@ -8659,19 +8427,19 @@ class XianyuLive:
                 cookie_id=self.cookie_id,
                 user_id=send_user_id,
                 item_id=item_id,
-                skip_wait=True  # 跳过内部等待，因为外部已实现防抖
+                skip_wait=True,
+                system_prompt_override=system_prompt
             )
 
             if reply:
-                reply = self._sanitize_auto_reply_text(reply, source='AI')
-                logger.info(f"【{self.cookie_id}】AI回复生成成功: {reply}")
+                logger.info(f"【{self.cookie_id}】AI[{intent}]回复生成成功: {reply}")
                 return reply
             else:
-                logger.warning(f"AI回复生成失败")
+                logger.warning(f"【{self.cookie_id}】AI回复生成失败")
                 return None
 
         except Exception as e:
-            logger.error(f"获取AI回复失败: {self._safe_str(e)}")
+            logger.error(f"【{self.cookie_id}】获取AI回复失败: {self._safe_str(e)}")
             return None
 
     def _parse_price(self, price_str: str) -> float:
@@ -13717,13 +13485,6 @@ class XianyuLive:
                 return
 
             # 检查该chat_id是否处于暂停状态
-            if pause_manager.is_account_paused(self.cookie_id):
-                remaining_time = pause_manager.get_remaining_account_pause_time(self.cookie_id)
-                remaining_minutes = remaining_time // 60
-                remaining_seconds = remaining_time % 60
-                logger.warning(f"[{msg_time}] 【{self.cookie_id}】【系统】账号自动回复已暂停，剩余时间: {remaining_minutes}分{remaining_seconds}秒")
-                return
-
             if pause_manager.is_chat_paused(chat_id):
                 remaining_time = pause_manager.get_remaining_pause_time(chat_id)
                 remaining_minutes = remaining_time // 60
@@ -13773,8 +13534,6 @@ class XianyuLive:
             if reply:
                 # 检查是否是图片发送标记
                 if reply.startswith("__IMAGE_SEND__"):
-                    if not await self._wait_before_auto_reply_send(chat_id, reply):
-                        return
                     # 提取图片URL（关键词回复不包含卡券ID）
                     image_url = reply.replace("__IMAGE_SEND__", "")
                     # 发送图片消息
@@ -13791,9 +13550,6 @@ class XianyuLive:
                         logger.error(f"[{msg_time}] 【{reply_source}图片发送失败】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id})")
                 else:
                     # 普通文本消息
-                    reply = self._sanitize_auto_reply_text(reply, source=reply_source or '')
-                    if not await self._wait_before_auto_reply_send(chat_id, reply):
-                        return
                     await self.send_msg(websocket, chat_id, send_user_id, reply)
                     # 记录发出的消息
                     msg_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -14278,10 +14034,6 @@ class XianyuLive:
                 f"direction={message_direction}, contentType={content_type}"
             )
 
-            if self._handle_platform_punishment_notice(chat_id, message_route_info, message, msg_id):
-                logger.info(f"【{self.cookie_id}】[{msg_id}] ⏹️ 处理结束（平台发消息限制）")
-                return
-
             if send_user_id == self.myid and not is_system_message:
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】[{msg_id}] 【手动发出】 商品({item_id}): {send_message}")
 
@@ -14576,9 +14328,6 @@ class XianyuLive:
                 '恭喜你拿到曝光卡',
                 '订单即将自动确认收货',
                 '温馨提醒：商品信息近期有过变更',
-                '暂时无法发消息',
-                '限制发送消息',
-                '无法发消息',
             ]
             if send_message == '[我已拍下，待付款]':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 系统消息不处理')

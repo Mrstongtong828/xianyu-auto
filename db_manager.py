@@ -1,4 +1,3 @@
-import re
 import sqlite3
 import os
 import threading
@@ -7,6 +6,7 @@ import time
 import json
 import random
 import string
+import re
 import aiohttp
 import io
 import base64
@@ -329,7 +329,6 @@ class DBManager:
                 username TEXT DEFAULT '',
                 password TEXT DEFAULT '',
                 show_browser INTEGER DEFAULT 0,
-                auto_cookie_refresh INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
@@ -899,11 +898,7 @@ Cookie数量: {cookie_count}
             ('smtp_from', '', '发件人显示名（留空则使用邮箱地址）'),
             ('smtp_use_tls', 'true', '是否启用TLS'),
             ('smtp_use_ssl', 'false', '是否启用SSL'),
-            ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥'),
-            ('risk_auth_throttle_window_minutes', '30', '自动账密恢复熔断统计窗口（分钟）'),
-            ('risk_auth_throttle_failure_threshold', '3', '自动账密恢复熔断失败次数阈值'),
-            ('risk_health_alert_enabled', 'true', '是否开启风控健康摘要告警'),
-            ('risk_health_alert_cooldown_minutes', '60', '风控健康摘要告警冷却时间（分钟）')
+            ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥')
             ''')
 
             # 检查并升级数据库
@@ -960,8 +955,6 @@ Cookie数量: {cookie_count}
                 cursor.execute("ALTER TABLE cookies ADD COLUMN auto_comment INTEGER DEFAULT 0")
                 logger.info("数据库迁移完成：添加auto_comment列")
 
-            self._ensure_cookie_runtime_columns(cursor)
-
             # 历史版本可能缺少订单平台时间字段，不能再依赖旧版本号分支触发
             self._ensure_orders_platform_time_columns(cursor)
 
@@ -1004,47 +997,10 @@ Cookie数量: {cookie_count}
             self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_type_status_created ON risk_control_logs(event_type, processing_status, created_at DESC)")
             self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_risk_control_logs_session_id ON risk_control_logs(session_id)")
 
-            risk_setting_defaults = [
-                ('risk_auth_throttle_window_minutes', '30', '自动账密恢复熔断统计窗口（分钟）'),
-                ('risk_auth_throttle_failure_threshold', '3', '自动账密恢复熔断失败次数阈值'),
-                ('risk_health_alert_enabled', 'true', '是否开启风控健康摘要告警'),
-                ('risk_health_alert_cooldown_minutes', '60', '风控健康摘要告警冷却时间（分钟）'),
-            ]
-            for key, value, description in risk_setting_defaults:
-                self._execute_sql(
-                    cursor,
-                    "INSERT OR IGNORE INTO system_settings (key, value, description) VALUES (?, ?, ?)",
-                    (key, value, description),
-                )
-
         except Exception as e:
             logger.error(f"数据库迁移失败: {e}")
             # 迁移失败不应该阻止程序启动
             pass
-
-    def _ensure_cookie_runtime_columns(self, cursor):
-        """确保历史 cookies 表具备运行期需要的账号字段。"""
-        cursor.execute("PRAGMA table_info(cookies)")
-        cookie_columns = {column[1] for column in cursor.fetchall()}
-        column_defs = {
-            'username': "TEXT DEFAULT ''",
-            'password': "TEXT DEFAULT ''",
-            'show_browser': "INTEGER DEFAULT 0",
-            'auto_cookie_refresh': "INTEGER DEFAULT 1",
-            'proxy_type': "TEXT DEFAULT 'none'",
-            'proxy_host': "TEXT DEFAULT ''",
-            'proxy_port': "INTEGER DEFAULT 0",
-            'proxy_user': "TEXT DEFAULT ''",
-            'proxy_pass': "TEXT DEFAULT ''",
-        }
-        for column_name, column_def in column_defs.items():
-            if column_name not in cookie_columns:
-                logger.info(f"添加cookies表的{column_name}列...")
-                self._execute_sql(cursor, f"ALTER TABLE cookies ADD COLUMN {column_name} {column_def}")
-                logger.info(f"数据库迁移完成：添加cookies.{column_name}列")
-
-        self._execute_sql(cursor, "UPDATE cookies SET auto_cookie_refresh = 1 WHERE auto_cookie_refresh IS NULL")
-        self._execute_sql(cursor, "UPDATE cookies SET proxy_type = 'none' WHERE proxy_type IS NULL OR proxy_type = ''")
 
     def _ensure_orders_platform_time_columns(self, cursor):
         """确保 orders 表存在平台时间字段。"""
@@ -1660,22 +1616,10 @@ Cookie数量: {cookie_count}
                 self._execute_sql(cursor, "ALTER TABLE cookies ADD COLUMN show_browser INTEGER DEFAULT 0")
                 logger.info("为cookies表添加show_browser字段")
 
-            # 为cookies表添加auto_cookie_refresh字段（如果不存在）
-            try:
-                self._execute_sql(cursor, "SELECT auto_cookie_refresh FROM cookies LIMIT 1")
-                logger.info("cookies表auto_cookie_refresh字段已存在")
-            except sqlite3.OperationalError:
-                self._execute_sql(cursor, "ALTER TABLE cookies ADD COLUMN auto_cookie_refresh INTEGER DEFAULT 1")
-                self._execute_sql(cursor, "UPDATE cookies SET auto_cookie_refresh = 1 WHERE auto_cookie_refresh IS NULL")
-                logger.info("为cookies表添加auto_cookie_refresh字段")
-            else:
-                self._execute_sql(cursor, "UPDATE cookies SET auto_cookie_refresh = 1 WHERE auto_cookie_refresh IS NULL")
-
             logger.info("✅ cookies表账号登录字段升级完成")
             logger.info("   - username: 用于密码登录的用户名")
             logger.info("   - password: 用于密码登录的密码")
             logger.info("   - show_browser: 登录时是否显示浏览器（0=隐藏，1=显示）")
-            logger.info("   - auto_cookie_refresh: 是否自动刷新Cookie（0=关闭，1=开启）")
             return True
         except Exception as e:
             logger.error(f"升级cookies表账号登录字段失败: {e}")
@@ -2110,11 +2054,9 @@ Cookie数量: {cookie_count}
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                self._ensure_cookie_runtime_columns(cursor)
-                self.conn.commit()
                 self._execute_sql(cursor, """
                     SELECT id, value, user_id, auto_confirm, remark, status_note,
-                           pause_duration, username, password, show_browser, auto_cookie_refresh, created_at,
+                           pause_duration, username, password, show_browser, created_at,
                            proxy_type, proxy_host, proxy_port, proxy_user, proxy_pass
                     FROM cookies WHERE id = ?
                 """, (cookie_id,))
@@ -2122,7 +2064,7 @@ Cookie数量: {cookie_count}
                 if result:
                     cookie_value = self._decrypt_secret(result[1])
                     password = self._decrypt_secret(result[8])
-                    proxy_pass = self._decrypt_secret(result[16])
+                    proxy_pass = self._decrypt_secret(result[15])
                     return {
                         'id': result[0],
                         'value': cookie_value,
@@ -2134,13 +2076,12 @@ Cookie数量: {cookie_count}
                         'username': result[7] or '',
                         'password': password,
                         'show_browser': bool(result[9]) if result[9] is not None else False,
-                        'auto_cookie_refresh': bool(result[10]) if result[10] is not None else True,
-                        'created_at': result[11],
+                        'created_at': result[10],
                         # 代理配置
-                        'proxy_type': result[12] or 'none',
-                        'proxy_host': result[13] or '',
-                        'proxy_port': result[14] or 0,
-                        'proxy_user': result[15] or '',
+                        'proxy_type': result[11] or 'none',
+                        'proxy_host': result[12] or '',
+                        'proxy_port': result[13] or 0,
+                        'proxy_user': result[14] or '',
                         'proxy_pass': proxy_pass
                     }
                 return None
@@ -2199,38 +2140,6 @@ Cookie数量: {cookie_count}
             except Exception as e:
                 logger.error(f"更新账号自动回复暂停时间失败: {e}")
                 return False
-
-    def update_auto_cookie_refresh(self, cookie_id: str, enabled: bool) -> bool:
-        """更新账号的自动Cookie刷新设置"""
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                self._ensure_cookie_runtime_columns(cursor)
-                self._execute_sql(
-                    cursor,
-                    "UPDATE cookies SET auto_cookie_refresh = ? WHERE id = ?",
-                    (1 if enabled else 0, cookie_id)
-                )
-                self.conn.commit()
-                logger.info(f"更新账号 {cookie_id} 自动刷新Cookie设置: {'开启' if enabled else '关闭'}")
-                return True
-            except Exception as e:
-                logger.error(f"更新自动刷新Cookie设置失败: {e}")
-                return False
-
-    def get_auto_cookie_refresh(self, cookie_id: str) -> bool:
-        """获取账号的自动Cookie刷新设置，默认开启"""
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                self._ensure_cookie_runtime_columns(cursor)
-                self.conn.commit()
-                self._execute_sql(cursor, "SELECT auto_cookie_refresh FROM cookies WHERE id = ?", (cookie_id,))
-                result = cursor.fetchone()
-                return bool(result[0]) if result and result[0] is not None else True
-            except Exception as e:
-                logger.error(f"获取自动刷新Cookie设置失败: {e}")
-                return True
 
     def get_cookie_pause_duration(self, cookie_id: str) -> int:
         """获取Cookie的自动回复暂停时间"""
@@ -2694,27 +2603,6 @@ Cookie数量: {cookie_count}
                 self.conn.rollback()
                 return False
 
-    def _sanitize_keyword_reply_text(self, reply: str) -> str:
-        """净化关键词回复中的高风险促成交话术。"""
-        sanitized = str(reply or '').strip()
-        risk_replacements = (
-            (re.compile(r'喜欢\s*直接\s*拍'), '有问题可以问我'),
-            (re.compile(r'直接\s*(拍|下单|付款|购买|买)'), '可以看看详情'),
-            (re.compile(r'(拍下|下单|买下|购买)了?之后'), '需要后'),
-            (re.compile(r'(拍下|下单|买下|购买)'), '看看详情'),
-            (re.compile(r'绝对(值得信赖|靠谱|放心)'), '可以放心了解'),
-            (re.compile(r'三十天内有任何问题'), '后续有问题'),
-            (re.compile(r'如果.*?(联系我售后|售后).*'), '后续有问题可以联系我。'),
-        )
-        risk_words = ('宝子', '诱导', '站外', '微信', 'QQ', 'vx', 'V信', '加我')
-        for pattern, replacement in risk_replacements:
-            sanitized = pattern.sub(replacement, sanitized)
-        for word in risk_words:
-            sanitized = sanitized.replace(word, '')
-        sanitized = re.sub(r'[，,、]\s*[，,、]+', '，', sanitized)
-        sanitized = re.sub(r'\s+', ' ', sanitized).strip(' ，,。~～')
-        return sanitized or ('在的，可以看下详情。' if reply else '')
-
     def save_text_keywords_only(self, cookie_id: str, keywords: List[Tuple[str, str, str]]) -> bool:
         """保存文本关键字列表，只删除文本类型的关键词，保留图片关键词"""
         with self.lock:
@@ -2753,11 +2641,10 @@ Cookie数量: {cookie_count}
                 for keyword, reply, item_id in keywords:
                     # 标准化item_id：空字符串转为NULL
                     normalized_item_id = item_id if item_id and item_id.strip() else None
-                    sanitized_reply = self._sanitize_keyword_reply_text(reply)
 
                     self._execute_sql(cursor,
                         "INSERT INTO keywords (cookie_id, keyword, reply, item_id, type) VALUES (?, ?, ?, ?, 'text')",
-                        (cookie_id, keyword, sanitized_reply, normalized_item_id))
+                        (cookie_id, keyword, reply, normalized_item_id))
 
                 self.conn.commit()
                 logger.info(f"文本关键字保存成功: {cookie_id}, {len(keywords)}条，图片关键词已保留")
@@ -2769,39 +2656,6 @@ Cookie数量: {cookie_count}
                 logger.error(f"文本关键字保存失败: {e}")
                 self.conn.rollback()
                 return False
-
-    def sanitize_existing_text_keywords(self, cookie_id: str = None) -> int:
-        """净化已保存文本关键词中的高风险促成交话术。"""
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                if cookie_id:
-                    self._execute_sql(
-                        cursor,
-                        "SELECT rowid, reply FROM keywords WHERE cookie_id = ? AND (type IS NULL OR type = 'text')",
-                        (cookie_id,)
-                    )
-                else:
-                    self._execute_sql(
-                        cursor,
-                        "SELECT rowid, reply FROM keywords WHERE type IS NULL OR type = 'text'"
-                    )
-
-                updated_count = 0
-                for rowid, reply in cursor.fetchall():
-                    sanitized = self._sanitize_keyword_reply_text(reply)
-                    if sanitized != (reply or '').strip():
-                        self._execute_sql(cursor, "UPDATE keywords SET reply = ? WHERE rowid = ?", (sanitized, rowid))
-                        updated_count += 1
-
-                if updated_count:
-                    self.conn.commit()
-                    logger.warning(f"已净化 {updated_count} 条文本关键词回复话术")
-                return updated_count
-            except Exception as e:
-                logger.error(f"净化文本关键词回复失败: {e}")
-                self.conn.rollback()
-                return 0
     
     def get_keywords(self, cookie_id: str) -> List[Tuple[str, str]]:
         """获取指定Cookie的关键字列表（向后兼容方法）"""
@@ -4396,8 +4250,12 @@ Cookie数量: {cookie_count}
         try:
             import aiohttp
 
-            # 使用GET请求发送邮件
-            api_url = "https://dy.zhinianboke.com/api/emailSend"
+            # 使用 GET 请求发送邮件（兼容旧版默认服务）
+            # 注意：部分公共邮件 API 可能存在证书过期/不稳定等问题，因此提供可配置项。
+            api_url = (self.get_system_setting('email_api_url') or '').strip() or "https://dy.zhinianboke.com/api/emailSend"
+            timeout_seconds = int(self.get_system_setting('email_api_timeout') or 15)
+            # 是否校验证书：默认关闭（避免默认服务证书过期导致验证码无法发送）
+            verify_ssl = (self.get_system_setting('email_api_verify_ssl') or 'false').lower() == 'true'
             params = {
                 'subject': subject,
                 'receiveUser': email,
@@ -4407,16 +4265,42 @@ Cookie数量: {cookie_count}
             async with aiohttp.ClientSession() as session:
                 try:
                     logger.info(f"使用API发送验证码邮件: {email}")
-                    async with session.get(api_url, params=params, timeout=15) as response:
+                    ssl_param = None if verify_ssl else False
+                    async with session.get(api_url, params=params, timeout=timeout_seconds, ssl=ssl_param) as response:
                         response_text = await response.text()
                         logger.info(f"邮件API响应: {response.status}")
 
-                        if response.status == 200:
+                        # HTTP 状态码不为 200 直接失败
+                        if response.status != 200:
+                            logger.error(
+                                f"API发送验证码邮件失败: {email}, 状态码: {response.status}, 响应: {response_text[:200]}"
+                            )
+                            return False
+
+                        # 兼容不同 API 返回格式：优先解析 JSON 并判断 success/data 字段
+                        success = False
+                        try:
+                            payload = await response.json(content_type=None)
+                            if isinstance(payload, dict):
+                                # 常见：{"success": true} / {"data": "success"} / {"data": true}
+                                if payload.get('success') is True:
+                                    success = True
+                                else:
+                                    data_value = payload.get('data')
+                                    if data_value is True or str(data_value).lower() in {'success', 'ok', 'true', '1'}:
+                                        success = True
+                        except Exception:
+                            # 非 JSON / 解析失败：退化为文本判断
+                            success = str(response_text).strip().lower() in {'ok', 'success', 'true', '1'}
+
+                        if success:
                             logger.info(f"验证码邮件发送成功(API): {email}")
                             return True
-                        else:
-                            logger.error(f"API发送验证码邮件失败: {email}, 状态码: {response.status}, 响应: {response_text[:200]}")
-                            return False
+
+                        logger.error(
+                            f"API发送验证码邮件返回失败: {email}, 响应: {response_text[:300]}"
+                        )
+                        return False
                 except Exception as e:
                     logger.error(f"API邮件发送异常: {email}, 错误: {e}")
                     return False
@@ -8575,202 +8459,6 @@ Cookie数量: {cookie_count}
         except Exception as e:
             logger.error(f"获取风控日志数量失败: {e}")
             return 0
-
-    def get_recent_risk_control_failure_summary(
-        self,
-        cookie_ids: Optional[List[str]] = None,
-        lookback_minutes: int = 60,
-    ) -> Dict[str, Any]:
-        """汇总近一段时间的风控失败/处理中情况，用于熔断和看板告警。"""
-
-        def _normalize_cookie_ids(values: Optional[List[str]]) -> Optional[List[str]]:
-            if values is None:
-                return None
-            normalized = []
-            for value in values:
-                text = str(value or '').strip()
-                if text:
-                    normalized.append(text)
-            return normalized
-
-        safe_minutes = max(1, min(int(lookback_minutes or 60), 7 * 24 * 60))
-        normalized_cookie_ids = _normalize_cookie_ids(cookie_ids)
-        empty_summary = {
-            'lookback_minutes': safe_minutes,
-            'failed_count': 0,
-            'processing_count': 0,
-            'slider_failed_count': 0,
-            'cookie_refresh_failed_count': 0,
-            'risk_protected_count': 0,
-            'accounts_with_failures': 0,
-            'accounts_with_processing': 0,
-            'top_failed_accounts': [],
-            'latest_failed_at': None,
-            'latest_processing_at': None,
-        }
-
-        if cookie_ids is not None and not normalized_cookie_ids:
-            return empty_summary
-
-        try:
-            with self.lock:
-                cursor = self.conn.cursor()
-                conditions = ["datetime(COALESCE(updated_at, created_at)) >= datetime('now', '-' || ? || ' minutes')"]
-                params: List[Any] = [safe_minutes]
-
-                if normalized_cookie_ids is not None:
-                    placeholders = ', '.join(['?'] * len(normalized_cookie_ids))
-                    conditions.append(f"cookie_id IN ({placeholders})")
-                    params.extend(normalized_cookie_ids)
-
-                where_clause = ' WHERE ' + ' AND '.join(conditions)
-
-                cursor.execute(
-                    f'''
-                    SELECT
-                        COALESCE(SUM(CASE WHEN processing_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
-                        COALESCE(SUM(CASE WHEN processing_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing_count,
-                        COALESCE(SUM(CASE WHEN processing_status = 'failed'
-                            AND (event_type = 'slider_captcha' OR result_code = 'password_login_slider_failed')
-                            THEN 1 ELSE 0 END), 0) AS slider_failed_count,
-                        COALESCE(SUM(CASE WHEN processing_status = 'failed'
-                            AND event_type = 'cookie_refresh'
-                            THEN 1 ELSE 0 END), 0) AS cookie_refresh_failed_count,
-                        COALESCE(SUM(CASE WHEN result_code = 'account_risk_protected' THEN 1 ELSE 0 END), 0) AS risk_protected_count,
-                        COUNT(DISTINCT CASE WHEN processing_status = 'failed' THEN cookie_id END) AS accounts_with_failures,
-                        COUNT(DISTINCT CASE WHEN processing_status = 'processing' THEN cookie_id END) AS accounts_with_processing,
-                        MAX(CASE WHEN processing_status = 'failed' THEN COALESCE(updated_at, created_at) END) AS latest_failed_at,
-                        MAX(CASE WHEN processing_status = 'processing' THEN COALESCE(updated_at, created_at) END) AS latest_processing_at
-                    FROM risk_control_logs
-                    {where_clause}
-                    ''',
-                    params,
-                )
-                row = cursor.fetchone() or (0, 0, 0, 0, 0, 0, 0, None, None)
-
-                cursor.execute(
-                    f'''
-                    SELECT
-                        cookie_id,
-                        COUNT(*) AS failed_count,
-                        SUM(CASE WHEN event_type = 'slider_captcha' OR result_code = 'password_login_slider_failed' THEN 1 ELSE 0 END) AS slider_failed_count,
-                        MAX(COALESCE(updated_at, created_at)) AS latest_failed_at
-                    FROM risk_control_logs
-                    {where_clause}
-                      AND processing_status = 'failed'
-                    GROUP BY cookie_id
-                    ORDER BY failed_count DESC, datetime(latest_failed_at) DESC
-                    LIMIT 5
-                    ''',
-                    params,
-                )
-                top_failed_accounts = [
-                    {
-                        'cookie_id': item[0],
-                        'failed_count': int(item[1] or 0),
-                        'slider_failed_count': int(item[2] or 0),
-                        'latest_failed_at': item[3],
-                    }
-                    for item in cursor.fetchall()
-                ]
-
-                return {
-                    'lookback_minutes': safe_minutes,
-                    'failed_count': int(row[0] or 0),
-                    'processing_count': int(row[1] or 0),
-                    'slider_failed_count': int(row[2] or 0),
-                    'cookie_refresh_failed_count': int(row[3] or 0),
-                    'risk_protected_count': int(row[4] or 0),
-                    'accounts_with_failures': int(row[5] or 0),
-                    'accounts_with_processing': int(row[6] or 0),
-                    'latest_failed_at': row[7],
-                    'latest_processing_at': row[8],
-                    'top_failed_accounts': top_failed_accounts,
-                }
-        except Exception as e:
-            logger.error(f"获取近期风控失败摘要失败: {e}")
-            return empty_summary
-
-    def should_throttle_auth_recovery(
-        self,
-        cookie_id: str,
-        lookback_minutes: int = 30,
-        failure_threshold: int = 3,
-    ) -> Dict[str, Any]:
-        """判断账号是否应暂停自动账密恢复，避免短时间连续失败继续触发平台风控。"""
-        safe_cookie_id = str(cookie_id or '').strip()
-        safe_minutes = max(1, min(int(lookback_minutes or 30), 24 * 60))
-        safe_threshold = max(1, int(failure_threshold or 3))
-
-        result = {
-            'should_throttle': False,
-            'cookie_id': safe_cookie_id,
-            'lookback_minutes': safe_minutes,
-            'failure_threshold': safe_threshold,
-            'failure_count': 0,
-            'slider_failed_count': 0,
-            'risk_protected_count': 0,
-            'latest_failed_at': None,
-            'reason': '',
-        }
-        if not safe_cookie_id:
-            return result
-
-        try:
-            with self.lock:
-                cursor = self.conn.cursor()
-                cursor.execute(
-                    '''
-                    SELECT
-                        COUNT(*) AS failure_count,
-                        COALESCE(SUM(CASE WHEN event_type = 'slider_captcha' OR result_code = 'password_login_slider_failed' THEN 1 ELSE 0 END), 0) AS slider_failed_count,
-                        COALESCE(SUM(CASE WHEN result_code = 'account_risk_protected' THEN 1 ELSE 0 END), 0) AS risk_protected_count,
-                        MAX(COALESCE(updated_at, created_at)) AS latest_failed_at
-                    FROM risk_control_logs
-                    WHERE cookie_id = ?
-                      AND processing_status = 'failed'
-                      AND COALESCE(result_code, '') NOT IN (
-                          'risk_recovery_throttled',
-                          'password_login_backoff',
-                          'password_login_cooldown',
-                          'auth_recovery_in_progress',
-                          'manual_refresh_active',
-                          'auto_cookie_refresh_disabled'
-                      )
-                      AND datetime(COALESCE(updated_at, created_at)) >= datetime('now', '-' || ? || ' minutes')
-                    ''',
-                    (safe_cookie_id, safe_minutes),
-                )
-                row = cursor.fetchone() or (0, 0, 0, None)
-                failure_count = int(row[0] or 0)
-                slider_failed_count = int(row[1] or 0)
-                risk_protected_count = int(row[2] or 0)
-
-                result.update({
-                    'failure_count': failure_count,
-                    'slider_failed_count': slider_failed_count,
-                    'risk_protected_count': risk_protected_count,
-                    'latest_failed_at': row[3],
-                })
-
-                if risk_protected_count > 0:
-                    result.update({
-                        'should_throttle': True,
-                        'reason': '账号已进入风控保护状态，请先在闲鱼客户端完成处理后再手动启用',
-                    })
-                    return result
-
-                if failure_count >= safe_threshold:
-                    result.update({
-                        'should_throttle': True,
-                        'reason': f'近{safe_minutes}分钟已有{failure_count}次风控恢复失败，暂停自动重试',
-                    })
-                    return result
-
-                return result
-        except Exception as e:
-            logger.error(f"判断账号风控熔断状态失败: {e}")
-            return result
 
     def get_slider_verification_session_stats(self, cookie_ids: Optional[List[str]] = None, range_key: str = 'all') -> Dict[str, Any]:
         """获取滑块验证会话级统计数据。"""

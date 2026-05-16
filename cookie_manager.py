@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 from loguru import logger
 from db_manager import db_manager
 
@@ -12,7 +12,6 @@ class CookieManager:
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
-        self.max_running_tasks = 1
         self.cookies: Dict[str, str] = {}
         self.tasks: Dict[str, asyncio.Task] = {}
         self.keywords: Dict[str, List[Tuple[str, str]]] = {}
@@ -42,134 +41,6 @@ class CookieManager:
             logger.info(f"从数据库加载了 {len(self.cookies)} 个Cookie、{len(self.keywords)} 组关键字、{len(self.cookie_status)} 个状态记录和 {len(self.auto_confirm_settings)} 个自动确认设置")
         except Exception as e:
             logger.error(f"从数据库加载数据失败: {e}")
-
-    def _running_cookie_ids(self) -> List[str]:
-        return [
-            cookie_id
-            for cookie_id, task in self.tasks.items()
-            if task and not task.done()
-        ]
-
-    async def _stop_task_for_limit(self, cookie_id: str, timeout: float = 10.0):
-        task = self.tasks.pop(cookie_id, None)
-        if not task:
-            return
-
-        if not task.done():
-            logger.warning(f"【{cookie_id}】后台数量限制生效，停止该账号后台任务")
-            task.cancel()
-            try:
-                await asyncio.wait_for(task, timeout=timeout)
-            except asyncio.TimeoutError:
-                logger.warning(f"【{cookie_id}】等待后台任务停止超时（{timeout:.0f}秒），继续执行")
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.error(f"停止后台任务时出错: {cookie_id}, {e}")
-
-        self.live_instances.pop(cookie_id, None)
-
-    async def _enforce_single_background(self, active_cookie_id: str, update_status: bool = True):
-        """确保同一时间只保留一个账号后台任务。"""
-        for other_cookie_id in list(self.tasks.keys()):
-            if other_cookie_id != active_cookie_id:
-                await self._stop_task_for_limit(other_cookie_id)
-
-        if update_status:
-            for cookie_id in list(self.cookies.keys()):
-                should_enable = cookie_id == active_cookie_id
-                if self.cookie_status.get(cookie_id, True) != should_enable:
-                    self.cookie_status[cookie_id] = should_enable
-                    try:
-                        db_manager.save_cookie_status(cookie_id, should_enable)
-                    except Exception as e:
-                        logger.warning(f"保存账号后台状态失败: {cookie_id}, {e}")
-
-    def get_background_status(self, user_id: int = None):
-        """返回后台任务状态快照，供后台管理页面使用。"""
-        cookie_map = db_manager.get_all_cookies(user_id) if user_id is not None else self.cookies
-        running_ids = set(self._running_cookie_ids())
-        active_ids = [cookie_id for cookie_id in cookie_map.keys() if cookie_id in running_ids]
-
-        accounts = []
-        for cookie_id in cookie_map.keys():
-            task = self.tasks.get(cookie_id)
-            accounts.append({
-                'id': cookie_id,
-                'enabled': self.cookie_status.get(cookie_id, True),
-                'running': bool(task and not task.done()),
-                'instance_exists': cookie_id in self.live_instances,
-            })
-
-        return {
-            'max_running': self.max_running_tasks,
-            'running_count': len(self._running_cookie_ids()),
-            'active_cookie_id': active_ids[0] if active_ids else None,
-            'accounts': accounts,
-        }
-
-    async def _activate_single_background_async(self, cookie_id: str):
-        if cookie_id not in self.cookies:
-            raise ValueError(f"Cookie ID {cookie_id} 不存在")
-
-        cookie_value = self.cookies.get(cookie_id)
-        if not cookie_value:
-            raise ValueError(f"Cookie值不存在，无法启动任务: {cookie_id}")
-
-        await self._enforce_single_background(cookie_id, update_status=True)
-
-        task = self.tasks.get(cookie_id)
-        if task and not task.done():
-            logger.info(f"【{cookie_id}】后台任务已在运行")
-            return True
-
-        cookie_info = db_manager.get_cookie_details(cookie_id)
-        user_id = cookie_info.get('user_id') if cookie_info else None
-        self.tasks[cookie_id] = self.loop.create_task(self._run_xianyu(cookie_id, cookie_value, user_id))
-        logger.info(f"已启动唯一后台账号任务: {cookie_id} (用户ID: {user_id})")
-        return True
-
-    def activate_single_background(self, cookie_id: str):
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            current_loop = None
-
-        if current_loop and current_loop == self.loop:
-            return self.loop.create_task(self._activate_single_background_async(cookie_id))
-
-        fut = asyncio.run_coroutine_threadsafe(self._activate_single_background_async(cookie_id), self.loop)
-        return fut.result()
-
-    async def _stop_all_backgrounds_async(self, update_status: bool = True):
-        for cookie_id in list(self.tasks.keys()):
-            await self._stop_task_for_limit(cookie_id)
-
-        if update_status:
-            for cookie_id in list(self.cookies.keys()):
-                if self.cookie_status.get(cookie_id, True):
-                    self.cookie_status[cookie_id] = False
-                    try:
-                        db_manager.save_cookie_status(cookie_id, False)
-                    except Exception as e:
-                        logger.warning(f"保存账号后台禁用状态失败: {cookie_id}, {e}")
-
-        return True
-
-    def stop_all_backgrounds(self, update_status: bool = True):
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            current_loop = None
-
-        if current_loop and current_loop == self.loop:
-            return self.loop.create_task(self._stop_all_backgrounds_async(update_status=update_status))
-
-        fut = asyncio.run_coroutine_threadsafe(
-            self._stop_all_backgrounds_async(update_status=update_status),
-            self.loop
-        )
-        return fut.result()
 
     def reload_from_db(self):
         """重新从数据库加载所有数据（用于备份导入后刷新）"""
@@ -273,7 +144,6 @@ class CookieManager:
             self.cookies[cookie_id] = cookie_value
             # 保存到数据库，如果没有指定user_id，则保持原有绑定关系
             db_manager.save_cookie(cookie_id, cookie_value, user_id)
-            await self._enforce_single_background(cookie_id, update_status=True)
 
             # 获取实际保存的user_id（如果没有指定，数据库会返回实际的user_id）
             actual_user_id = user_id
@@ -403,8 +273,7 @@ class CookieManager:
 
                 # 恢复关键词和状态
                 self.keywords[cookie_id] = original_keywords
-                self.cookie_status[cookie_id] = True
-                await self._enforce_single_background(cookie_id, update_status=True)
+                self.cookie_status[cookie_id] = original_status
 
                 # 重新启动任务
                 task = self.loop.create_task(self._run_xianyu(cookie_id, new_value, original_user_id))
@@ -452,7 +321,7 @@ class CookieManager:
         if old_status != enabled:
             if enabled:
                 # 启用账号：启动任务
-                self.activate_single_background(cookie_id)
+                self._start_cookie_task(cookie_id)
             else:
                 # 禁用账号：停止任务
                 self._stop_cookie_task(cookie_id)
