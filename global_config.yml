@@ -90,3 +90,15 @@ FEISHU:
     account: ''
     default_text: ''
     reply_result: true
+AUTO_DELIVERY:
+  enabled: true  # 是否启用付款后自动回复
+  delay_seconds: 30  # 延迟时间（秒），默认30秒
+  fixed_message: |
+    亲爱的买家您好！
+    您的订单已确认，我们会尽快为您安排发货。
+
+    【发货时间】工作日24小时内发货，节假日顺延
+    【物流信息】发货后会自动推送物流单号
+    【仪器使用】请仔细阅读说明书，如有疑问随时联系客服
+
+    感谢您的购买！

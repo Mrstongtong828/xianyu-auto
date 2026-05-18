@@ -122,6 +122,11 @@ YIFAN_API = config.get('YIFAN_API', {
     'callback_url': 'http://116.196.116.76/yifan.php',
     'query_url': 'http://116.196.116.76/yifan.php'
 })
+AUTO_DELIVERY = config.get('AUTO_DELIVERY', {
+    'enabled': True,
+    'delay_seconds': 30,
+    'fixed_message': '亲爱的买家您好！您的订单已确认，我们会尽快为您发货！'
+})
 _cookies_raw = config.get('COOKIES', [])
 if isinstance(_cookies_raw, list):
     COOKIES_LIST = _cookies_raw

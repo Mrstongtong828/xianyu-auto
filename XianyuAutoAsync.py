@@ -21,7 +21,7 @@ from config import (
     TOKEN_REFRESH_INTERVAL, TOKEN_RETRY_INTERVAL,
     SESSION_KEEPALIVE_INTERVAL, SESSION_KEEPALIVE_RETRY_INTERVAL, COOKIES_STR,
     LOG_CONFIG, AUTO_REPLY, DEFAULT_HEADERS, WEBSOCKET_HEADERS,
-    APP_CONFIG, API_ENDPOINTS, YIFAN_API
+    APP_CONFIG, API_ENDPOINTS, YIFAN_API, AUTO_DELIVERY
 )
 # from app.logging_config import setup_logging  # 已移除，模块不存在
 import sys
@@ -4030,13 +4030,12 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】提取订单ID失败: {self._safe_str(e)}")
             return None
 
-    async def _handle_simple_message_auto_delivery(self, websocket, order_id: str, item_id: str, 
+    async def _handle_simple_message_auto_delivery(self, websocket, order_id: str, item_id: str,
                                                     user_id: str, chat_id: str, msg_time: str, msg_id: str):
-        """处理简化结构消息的自动发货逻辑
-        
-        专门用于处理简化结构的发货通知消息（message['1']是字符串的情况）
-        发货确认统一在 _auto_delivery 内执行，避免重复确认导致漏发
-        
+        """处理简化结构消息的自动回复逻辑（简化版）
+
+        检测到付款消息后，直接发送预设的固定文本，不进行卡券和规则匹配
+
         Args:
             websocket: WebSocket连接
             order_id: 订单ID
@@ -4047,340 +4046,97 @@ class XianyuLive:
             msg_id: 消息ID
         """
         try:
-            logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🚀 开始处理简化消息自动发货: order_id={order_id}, item_id={item_id}')
-            
-            # 检查商品是否属于当前账号
-            if item_id and item_id != "未知商品":
-                try:
-                    if not await self._ensure_item_owned_by_current_account(
-                        item_id,
-                        log_prefix=f'[{msg_time}] 【{self.cookie_id}】[{msg_id}]'
-                    ):
-                        logger.warning(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ❌ 商品 {item_id} 不属于当前账号，跳过自动发货')
-                        self._record_delivery_log(
-                            order_id=order_id,
-                            item_id=item_id,
-                            buyer_id=user_id,
-                            status='failed',
-                            reason='商品不属于当前账号，跳过自动发货',
-                            channel='auto'
-                        )
-                        return
-                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 商品 {item_id} 归属验证通过')
-                except Exception as e:
-                    logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 检查商品归属失败: {self._safe_str(e)}，跳过自动发货')
-                    self._record_delivery_log(
-                        order_id=order_id,
-                        item_id=item_id,
-                        buyer_id=user_id,
-                        status='failed',
-                        reason=f'检查商品归属失败: {self._safe_str(e)}',
-                        channel='auto'
-                    )
-                    return
-            
-            # 检查订单是否已发货
+            logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🚀 开始处理付款后自动回复: order_id={order_id}')
+
+            # 检查是否启用自动回复
+            if not AUTO_DELIVERY.get('enabled', True):
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ⚠️ 自动回复功能未启用，跳过')
+                return
+
+            # 检查订单是否已处理（防重复）
             if not self.can_auto_delivery(order_id):
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 订单 {order_id} 在冷却期内，跳过发货')
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🔒 订单 {order_id} 在冷却期内，跳过')
                 self._record_delivery_log(
                     order_id=order_id,
                     item_id=item_id,
                     buyer_id=user_id,
                     status='skipped',
-                    reason='订单在冷却期内，跳过发货',
+                    reason='订单在冷却期内，跳过',
                     channel='auto'
                 )
                 return
-            
+
             # 检查延迟锁状态
             lock_key = order_id
             if self.is_lock_held(lock_key):
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🔒 订单 {lock_key} 延迟锁仍在持有状态，跳过发货')
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🔒 订单 {lock_key} 延迟锁持有中，跳过')
                 self._record_delivery_log(
                     order_id=order_id,
                     item_id=item_id,
                     buyer_id=user_id,
                     status='skipped',
-                    reason='订单延迟锁持有中，跳过发货',
+                    reason='订单延迟锁持有中，跳过',
                     channel='auto'
                 )
                 return
-            
+
             # 获取订单锁
             order_lock = self._order_locks[lock_key]
             self._lock_usage_times[lock_key] = time.time()
-            
+
             async with order_lock:
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 获取订单锁成功: {lock_key}')
-                
-                # 再次检查延迟锁和冷却状态
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 获取订单锁成功')
+
+                # 再次检查（双重检查）
                 if self.is_lock_held(lock_key) or not self.can_auto_delivery(order_id):
-                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 获取锁后检查发现订单已处理，跳过发货')
-                    self._record_delivery_log(
-                        order_id=order_id,
-                        item_id=item_id,
-                        buyer_id=user_id,
-                        status='skipped',
-                        reason='获取锁后发现订单已处理，跳过发货',
-                        channel='auto'
-                    )
+                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🔒 获取锁后检查发现订单已处理，跳过')
                     return
 
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 📤 开始执行自动发货内容发送（发送成功后再确认发货）')
-                
-                # 获取商品标题
-                item_title = "待获取商品信息"
+                # 读取固定回复文本
+                fixed_message = AUTO_DELIVERY.get('fixed_message', '亲爱的买家您好！您的订单已确认，我们会尽快为您发货！')
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 📤 准备发送固定回复文本')
 
-                pending_finalize_meta = self._get_pending_delivery_finalization_meta(order_id, 1)
-                if pending_finalize_meta:
-                    finalize_result = await self._finalize_delivery_after_send(
-                        delivery_meta=pending_finalize_meta,
-                        order_id=order_id,
-                        item_id=item_id
-                    )
-                    if not finalize_result.get('success'):
-                        self._persist_delivery_finalization_state(
-                            order_id=order_id,
-                            item_id=item_id,
-                            buyer_id=user_id,
-                            delivery_meta=pending_finalize_meta,
-                            channel='auto',
-                            status='sent',
-                            last_error=finalize_result.get('error') or '补完成 finalize 失败'
-                        )
-                        self._record_delivery_log(
-                            order_id=order_id,
-                            item_id=item_id,
-                            buyer_id=user_id,
-                            status='failed',
-                            reason=finalize_result.get('error') or '检测到已发送记录，但补完成发货收尾失败',
-                            channel='auto',
-                            rule_meta=pending_finalize_meta
-                        )
-                        await self.send_delivery_failure_notification(
-                            send_user_name="买家",
-                            send_user_id=user_id,
-                            item_id=item_id,
-                            error_message=finalize_result.get('error') or '检测到已发送记录，但补完成发货收尾失败',
-                            chat_id=chat_id
-                        )
-                        return
+                try:
+                    # 发送消息
+                    await self.send_msg(websocket, chat_id, user_id, fixed_message)
+                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 固定回复发送成功')
 
-                    self._persist_delivery_finalization_state(
-                        order_id=order_id,
-                        item_id=item_id,
-                        buyer_id=user_id,
-                        delivery_meta=pending_finalize_meta,
-                        channel='auto',
-                        status='finalized'
-                    )
-                    self._sync_order_delivery_progress(
-                        order_id=order_id,
-                        cookie_id=self.cookie_id,
-                        expected_quantity=1,
-                        context="自动发货补完成收尾成功"
-                    )
+                    # 激活延迟锁（10分钟冷却期）
                     self._activate_delivery_lock(lock_key, delay_minutes=10)
+
+                    # 记录成功日志
                     self._record_delivery_log(
                         order_id=order_id,
                         item_id=item_id,
                         buyer_id=user_id,
                         status='success',
-                        reason='检测到发货消息已发送，本次补完成收尾成功',
+                        reason='付款后自动回复发送成功',
                         channel='auto',
-                        rule_meta=pending_finalize_meta
+                        rule_meta={'card_type': 'fixed_text', 'rule_keyword': 'auto_reply'}
                     )
-                    await self.send_delivery_failure_notification(
-                        send_user_name="买家",
-                        send_user_id=user_id,
-                        item_id=item_id,
-                        error_message="发货成功",
-                        chat_id=chat_id
-                    )
-                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 简化消息自动发货补完成收尾成功')
-                    return
-                
-                # 调用自动发货方法获取发货内容
-                delivery_result = await self._auto_delivery(
-                    item_id, item_title, order_id, user_id, chat_id, include_meta=True
-                )
-                if isinstance(delivery_result, dict):
-                    delivery_content = delivery_result.get('content')
-                    delivery_error = delivery_result.get('error')
-                    delivery_steps = delivery_result.get('delivery_steps') or []
-                    delivery_rule_meta = {
-                        'rule_id': delivery_result.get('rule_id'),
-                        'rule_keyword': delivery_result.get('rule_keyword'),
-                        'card_type': delivery_result.get('card_type'),
-                        'match_mode': delivery_result.get('match_mode'),
-                        'order_spec_mode': delivery_result.get('order_spec_mode'),
-                        'rule_spec_mode': delivery_result.get('rule_spec_mode'),
-                        'item_config_mode': delivery_result.get('item_config_mode'),
-                        'card_id': delivery_result.get('card_id'),
-                        'card_description': delivery_result.get('card_description'),
-                        'data_card_pending_consume': delivery_result.get('data_card_pending_consume'),
-                        'data_line': delivery_result.get('data_line'),
-                        'data_reservation_id': delivery_result.get('data_reservation_id'),
-                        'data_reservation_status': delivery_result.get('data_reservation_status'),
-                        'delivery_unit_index': delivery_result.get('delivery_unit_index')
-                    }
-                else:
-                    delivery_content = delivery_result
-                    delivery_error = None
-                    delivery_steps = []
-                    delivery_rule_meta = {}
 
-                if delivery_content:
-                    delivery_rule_meta.setdefault('success', True)
-                    if not delivery_steps:
-                        delivery_steps = self._build_delivery_steps(
-                            delivery_content,
-                            delivery_rule_meta.get('card_description', '')
-                        )
-
-                    # 发送发货内容
-                    user_url = f'https://www.goofish.com/personal?userId={user_id}'
-                    
-                    try:
-                        await self._send_delivery_steps(
-                            websocket,
-                            chat_id,
-                            user_id,
-                            delivery_steps,
-                            user_url=user_url,
-                            log_prefix=f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 自动发货'
-                        )
-
-                        if not self._mark_data_reservation_sent_if_needed(delivery_result if isinstance(delivery_result, dict) else delivery_rule_meta):
-                            self._release_data_reservation_if_needed(
-                                delivery_result if isinstance(delivery_result, dict) else delivery_rule_meta,
-                                error='发送成功后标记预占已发送失败'
-                            )
-                            raise Exception('批量数据预占标记已发送失败')
-
-                        self._persist_delivery_finalization_state(
-                            order_id=order_id,
-                            item_id=item_id,
-                            buyer_id=user_id,
-                            delivery_meta=delivery_result if isinstance(delivery_result, dict) else delivery_rule_meta,
-                            channel='auto',
-                            status='sent'
-                        )
-
-                        finalize_result = await self._finalize_delivery_after_send(
-                            delivery_meta=delivery_result if isinstance(delivery_result, dict) else delivery_rule_meta,
-                            order_id=order_id,
-                            item_id=item_id
-                        )
-                        if not finalize_result.get('success'):
-                            self._persist_delivery_finalization_state(
-                                order_id=order_id,
-                                item_id=item_id,
-                                buyer_id=user_id,
-                                delivery_meta=delivery_result if isinstance(delivery_result, dict) else delivery_rule_meta,
-                                channel='auto',
-                                status='sent',
-                                last_error=finalize_result.get('error') or '发送成功但提交发货副作用失败'
-                            )
-                            self._record_delivery_log(
-                                order_id=order_id,
-                                item_id=item_id,
-                                buyer_id=user_id,
-                                status='failed',
-                                reason=finalize_result.get('error') or '发送成功但提交发货副作用失败',
-                                channel='auto',
-                                rule_meta=delivery_rule_meta
-                            )
-                            await self.send_delivery_failure_notification(
-                                send_user_name="买家",
-                                send_user_id=user_id,
-                                item_id=item_id,
-                                error_message=finalize_result.get('error') or '发送成功但提交发货副作用失败',
-                                chat_id=chat_id
-                            )
-                            return
-
-                        self._persist_delivery_finalization_state(
-                            order_id=order_id,
-                            item_id=item_id,
-                            buyer_id=user_id,
-                            delivery_meta=delivery_result if isinstance(delivery_result, dict) else delivery_rule_meta,
-                            channel='auto',
-                            status='finalized'
-                        )
-
-                        self._sync_order_delivery_progress(
-                            order_id=order_id,
-                            cookie_id=self.cookie_id,
-                            expected_quantity=1,
-                            context="自动发货发送成功"
-                        )
-                        self._activate_delivery_lock(lock_key, delay_minutes=10)
-
-                        self._record_delivery_log(
-                            order_id=order_id,
-                            item_id=item_id,
-                            buyer_id=user_id,
-                            status='success',
-                            reason='自动发货步骤发送成功',
-                            channel='auto',
-                            rule_meta=delivery_rule_meta
-                        )
-                    except Exception as send_e:
-                        self._record_delivery_log(
-                            order_id=order_id,
-                            item_id=item_id,
-                            buyer_id=user_id,
-                            status='failed',
-                            reason=f'自动发货消息发送失败: {self._safe_str(send_e)}',
-                            channel='auto',
-                            rule_meta=delivery_rule_meta
-                        )
-                        raise
-                    
-                    # 发送成功通知
-                    await self.send_delivery_failure_notification(
-                        send_user_name="买家",
-                        send_user_id=user_id,
-                        item_id=item_id,
-                        error_message="发货成功",
-                        chat_id=chat_id
-                    )
-                    
-                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 简化消息自动发货完成')
-                else:
-                    logger.warning(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ❌ 未找到匹配的发货规则或获取发货内容失败')
+                except Exception as send_e:
+                    logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ❌ 发送消息失败: {self._safe_str(send_e)}')
                     self._record_delivery_log(
                         order_id=order_id,
                         item_id=item_id,
                         buyer_id=user_id,
                         status='failed',
-                        reason=delivery_error or '未找到匹配的发货规则或获取发货内容失败',
-                        channel='auto',
-                        rule_meta=delivery_rule_meta
+                        reason=f'发送消息失败: {self._safe_str(send_e)}',
+                        channel='auto'
                     )
-                    await self.send_delivery_failure_notification(
-                        send_user_name="买家",
-                        send_user_id=user_id,
-                        item_id=item_id,
-                        error_message="未找到匹配的发货规则或获取发货内容失败",
-                        chat_id=chat_id
-                    )
+                    raise
 
         except Exception as e:
-            self._release_data_reservation_if_needed(
-                delivery_result if 'delivery_result' in locals() and isinstance(delivery_result, dict) else delivery_rule_meta if 'delivery_rule_meta' in locals() else None,
-                error=f'自动发货发送失败: {self._safe_str(e)}'
-            )
+            logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ❌ 自动回复异常: {self._safe_str(e)}')
             self._record_delivery_log(
                 order_id=order_id,
                 item_id=item_id,
                 buyer_id=user_id,
                 status='failed',
-                reason=f'简化消息自动发货异常: {self._safe_str(e)}',
+                reason=f'自动回复异常: {self._safe_str(e)}',
                 channel='auto'
             )
-            logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 简化消息自动发货异常: {self._safe_str(e)}')
             import traceback
             logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 异常堆栈: {traceback.format_exc()}')
 
@@ -13966,6 +13722,71 @@ class XianyuLive:
                     # 如果不是简化结构，继续走正常流程
             except Exception:
                 pass
+
+            # 【新增】处理简化的付款通知消息（没有redReminder字段的同步包）
+            # 格式1: {'1': 'sid@goofish', '2': 1, '3': 'xxx.PNM', '4': timestamp}
+            # 格式2: {'1': [{'1': 'sid@goofish', '2': 1, '3': 1, '4': 'xxx@goofish'}]}
+            simple_sid = None
+
+            # 检查格式1：message['1'] 是字符串
+            if (isinstance(message, dict)
+                and isinstance(message.get('1'), str)
+                and '@goofish' in str(message.get('1', ''))):
+                simple_sid = message.get('1', '')
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🔔 检测到简化付款通知消息（格式1）')
+
+            # 检查格式2：message['1'] 是列表
+            elif (isinstance(message, dict)
+                  and isinstance(message.get('1'), list)
+                  and len(message.get('1', [])) > 0
+                  and isinstance(message['1'][0], dict)
+                  and isinstance(message['1'][0].get('1'), str)
+                  and '@goofish' in str(message['1'][0].get('1', ''))):
+                simple_sid = message['1'][0].get('1', '')
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🔔 检测到简化付款通知消息（格式2）')
+
+            if simple_sid:
+                # 检查是否启用自动确认发货
+                if self.is_auto_confirm_enabled():
+                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 自动确认发货已启用，延迟处理')
+                    await asyncio.sleep(30)
+
+                    session_id_str = simple_sid.split('@')[0] if '@' in str(simple_sid) else simple_sid
+                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🔍 简化消息解析: sid={simple_sid}')
+
+                    log_prefix = f'[{msg_time}] 【{self.cookie_id}】[{msg_id}]'
+                    sid_lookup = self._lookup_delivery_order_by_sid(
+                        simple_sid,
+                        minutes=5,
+                        log_prefix=log_prefix
+                    )
+
+                    recent_order = sid_lookup.get('order')
+                    sid_match_type = sid_lookup.get('match_type', 'missing')
+
+                    if recent_order and sid_match_type in {'pending_ship', 'bargain_ready'}:
+                        order_id = recent_order.get('order_id')
+                        item_id = recent_order.get('item_id', '未知商品')
+                        buyer_id = recent_order.get('buyer_id', 'unknown')
+
+                        logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 找到待发货订单: order_id={order_id}')
+
+                        # 调用简化的自动回复方法
+                        await self._handle_simple_message_auto_delivery(
+                            websocket=websocket,
+                            order_id=order_id,
+                            item_id=item_id,
+                            user_id=buyer_id,
+                            chat_id=session_id_str,
+                            msg_time=msg_time,
+                            msg_id=msg_id
+                        )
+                        logger.info(f"【{self.cookie_id}】[{msg_id}] ⏹️ 处理结束（简化付款消息自动回复）")
+                        return
+                    else:
+                        logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ℹ️ 未找到待发货订单，跳过')
+                else:
+                    logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ⚠️ 自动确认发货未启用，跳过')
 
             # 判断是否为聊天消息
             if not self.is_chat_message(message):
