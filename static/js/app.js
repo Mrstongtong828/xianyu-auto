@@ -4094,9 +4094,19 @@ async function loadBackgroundManager() {
     try {
         const data = await fetchJSON(`${apiBase}/backgrounds`);
         const accounts = data.accounts || [];
-        document.getElementById('backgroundActiveAccount').textContent = data.active_cookie_id || '未启动';
-        document.getElementById('backgroundRunningCount').textContent = `${data.running_count || 0} / ${data.max_running || 1}`;
-        document.getElementById('backgroundLimit').textContent = `最多 ${data.max_running || 1} 个后台`;
+        const activeAccounts = data.active_cookie_ids || (data.active_cookie_id ? [data.active_cookie_id] : []);
+        const activeLabel = activeAccounts.length === 0
+            ? '未启动'
+            : (activeAccounts.length <= 2
+                ? activeAccounts.join('、')
+                : `${activeAccounts.slice(0, 2).join('、')} 等 ${activeAccounts.length} 个`);
+        document.getElementById('backgroundActiveAccount').textContent = activeLabel;
+        document.getElementById('backgroundRunningCount').textContent = data.max_running == null
+            ? `${data.running_count || 0}`
+            : `${data.running_count || 0} / ${data.max_running || 1}`;
+        document.getElementById('backgroundLimit').textContent = data.max_running == null
+            ? '支持多账号后台'
+            : `最多 ${data.max_running || 1} 个后台`;
 
         if (accounts.length === 0) {
             tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">暂无账号</td></tr>';
@@ -4106,7 +4116,7 @@ async function loadBackgroundManager() {
         tbody.innerHTML = accounts.map(account => {
             const remark = account.remark || account.username || '';
             const actionButton = account.running
-                ? '<button class="btn btn-sm btn-outline-secondary" disabled><i class="bi bi-check2-circle me-1"></i>当前后台</button>'
+                ? `<button class="btn btn-sm btn-outline-warning" onclick="activateBackground('${account.id}')"><i class="bi bi-arrow-clockwise me-1"></i>重启后台</button>`
                 : `<button class="btn btn-sm btn-primary" onclick="activateBackground('${account.id}')"><i class="bi bi-play-circle me-1"></i>设为后台</button>`;
 
             return `
@@ -4133,7 +4143,7 @@ async function activateBackground(accountId) {
         const result = await fetchJSON(`${apiBase}/backgrounds/${encodeURIComponent(accountId)}/activate`, {
             method: 'POST'
         });
-        showToast(result.message || `已启动账号 "${accountId}" 后台`, 'success');
+        showToast(result.message || `已启动/重启账号 "${accountId}" 后台`, 'success');
         await loadBackgroundManager();
         if (document.getElementById('accounts-section')?.classList.contains('active')) {
             await loadCookies();
@@ -4147,7 +4157,7 @@ async function activateBackground(accountId) {
 }
 
 async function stopAllBackgrounds() {
-    if (!confirm('确定要停止全部账号后台吗？停止后将不会自动接收消息，直到重新选择一个后台账号。')) {
+    if (!confirm('确定要停止全部账号后台吗？停止后将不会自动接收消息，直到再次启动相关账号后台。')) {
         return;
     }
 
@@ -12488,14 +12498,6 @@ async function handlePasswordLogin(event) {
     event.preventDefault();
     
     const accountId = document.getElementById('passwordLoginAccountId').value.trim();
-    const account = document.getElementById('passwordLoginAccount').value.trim();
-    const password = document.getElementById('passwordLoginPassword').value;
-    const showBrowser = document.getElementById('passwordLoginShowBrowser').checked;
-    
-    if (!accountId || !account || !password) {
-        showToast('请填写完整的登录信息', 'warning');
-        return;
-    }
     
     // 禁用提交按钮，显示加载状态
     const submitBtn = event.target.querySelector('button[type="submit"]');
@@ -12512,9 +12514,8 @@ async function handlePasswordLogin(event) {
             },
             body: JSON.stringify({
                 account_id: accountId,
-                account: account,
-                password: password,
-                show_browser: showBrowser
+                manual_login: true,
+                show_browser: true
             })
         });
         
@@ -12522,10 +12523,11 @@ async function handlePasswordLogin(event) {
         
         if (response.ok && data.success && data.session_id) {
             passwordLoginSessionId = data.session_id;
+            showToast('已打开闲鱼消息登录页，请在浏览器中完成登录', 'info');
             // 开始轮询检查登录状态
             startPasswordLoginCheck();
         } else {
-            showToast(data.message || '登录失败，请检查账号密码是否正确', 'danger');
+            showToast(data.message || '登录失败，请重试', 'danger');
             submitBtn.disabled = false;
             submitBtn.innerHTML = originalText;
         }
@@ -12827,7 +12829,8 @@ function handlePasswordLoginSuccess(data) {
     // 关闭二维码模态框
     closePasswordLoginQRModal();
     
-    showToast(`账号 ${data.account_id} 登录成功！`, 'success');
+    const accountLabel = data.account_id || '闲鱼账号';
+    showToast(`${accountLabel} 登录成功！`, 'success');
     
     // 隐藏表单
     togglePasswordLogin();
@@ -12847,7 +12850,7 @@ function handlePasswordLoginFailure(data) {
     closePasswordLoginQRModal();
     
     // 优先使用 message，如果没有则使用 error 字段
-    const errorMessage = data.message || data.error || '登录失败，请检查账号密码是否正确';
+    const errorMessage = data.message || data.error || '登录失败，请重试';
     console.log('显示错误消息:', errorMessage); // 调试日志
     
     showToast(errorMessage, 'danger');  // 使用 'danger' 而不是 'error'，因为 Bootstrap 使用 'danger' 作为错误类型

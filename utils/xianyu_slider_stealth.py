@@ -2505,6 +2505,9 @@ class XianyuSliderStealth:
 
         if monitor_page:
             try:
+                if self._page_looks_like_verification(monitor_page):
+                    logger.info(f"【{self.pure_user_id}】当前处于身份验证页，暂停额外登录探测，继续等待用户完成验证")
+                    return False, monitor_page, cookie_dict
                 if self._check_login_success_by_element(monitor_page):
                     logger.success(f"【{self.pure_user_id}】✅ 当前监控页面已确认登录成功")
                     return True, monitor_page, cookie_dict
@@ -2823,6 +2826,8 @@ class XianyuSliderStealth:
             token_attempt += 1
             token_ok, verification_url, token_payload = self._request_login_token_in_browser_context(context, monitor_page)
             if token_ok:
+                if hasattr(self, '_last_manual_refresh_verification_url'):
+                    self._last_manual_refresh_verification_url = None
                 stable_cookies = self._snapshot_context_cookies(context)
                 if self._has_completed_login_cookies(stable_cookies):
                     logger.success(f"【{self.pure_user_id}】手动刷新 Cookie 已通过浏览器侧Token确认")
@@ -2830,12 +2835,28 @@ class XianyuSliderStealth:
                     return stable_cookies
 
             if verification_url:
-                logger.warning(f"【{self.pure_user_id}】手动刷新Token确认需要继续验证，已打开验证页: {verification_url}")
                 try:
-                    verify_page = monitor_page if monitor_page and not monitor_page.is_closed() else context.new_page()
-                    verify_page.goto(verification_url, wait_until='domcontentloaded', timeout=60000)
-                    monitor_page = verify_page
-                    time.sleep(2)
+                    current_url = self._safe_page_url(monitor_page) if monitor_page else ''
+                    already_on_verification_page = bool(
+                        monitor_page
+                        and not monitor_page.is_closed()
+                        and (
+                            current_url == verification_url
+                            or self._looks_like_verification_url(current_url)
+                        )
+                    )
+                    repeated_verification_url = getattr(self, '_last_manual_refresh_verification_url', None) == verification_url
+                    if already_on_verification_page or repeated_verification_url:
+                        logger.info(
+                            f"【{self.pure_user_id}】手动刷新仍需验证，但当前已在验证页，继续等待用户完成验证"
+                        )
+                    else:
+                        logger.warning(f"【{self.pure_user_id}】手动刷新Token确认需要继续验证，已打开验证页: {verification_url}")
+                        verify_page = monitor_page if monitor_page and not monitor_page.is_closed() else context.new_page()
+                        verify_page.goto(verification_url, wait_until='domcontentloaded', timeout=60000)
+                        monitor_page = verify_page
+                        self._last_manual_refresh_verification_url = verification_url
+                        time.sleep(2)
                 except Exception as verify_e:
                     logger.warning(f"【{self.pure_user_id}】打开手动刷新Token验证页失败: {verify_e}")
 
@@ -5473,14 +5494,12 @@ class XianyuSliderStealth:
                         logger.info(f"【{self.pure_user_id}】✅ 滑块已重置，准备重新检测")
                         time.sleep(1.0)
                     else:
-                        # 点击重置失败时才回退到刷新页面
-                        logger.warning(f"【{self.pure_user_id}】⚠️ 点击重置失败，回退到刷新页面...")
-                        try:
-                            self.page.reload(wait_until='networkidle', timeout=15000)
-                            time.sleep(1.0)
-                            logger.info(f"【{self.pure_user_id}】✅ 页面刷新完成，准备重新检测滑块")
-                        except Exception as refresh_error:
-                            logger.warning(f"【{self.pure_user_id}】⚠️ 页面刷新也失败: {refresh_error}")
+                        # 点击重置失败时不要立刻整页重载，避免连续触发风控
+                        cooldown = random.uniform(1.8, 3.2)
+                        logger.warning(
+                            f"【{self.pure_user_id}】⚠️ 点击重置失败，保留当前页面并冷却{cooldown:.1f}秒后继续"
+                        )
+                        time.sleep(cooldown)
 
                     # 清除缓存的frame引用，强制重新检测滑块位置
                     if hasattr(self, '_detected_slider_frame'):
@@ -5969,41 +5988,15 @@ class XianyuSliderStealth:
                                     )
                                     time.sleep(3)  # 等待滑块验证后的状态更新
                                 else:
-                                    # 3次失败后，刷新页面重试
-                                    logger.warning(f"【{self.pure_user_id}】⚠️ 滑块处理3次都失败，刷新页面后重试...")
-                                    try:
-                                        self.page.reload(wait_until="domcontentloaded", timeout=30000)
-                                        logger.info(f"【{self.pure_user_id}】✅ 页面刷新完成")
-                                        time.sleep(2)
-                                        slider_success = self.solve_slider(max_retries=3)
-                                        if not slider_success:
-                                            logger.error(f"【{self.pure_user_id}】❌ 刷新后滑块验证仍然失败")
-                                            self._finish_password_login_slider_risk_log(
-                                                slider_risk_log,
-                                                success=False,
-                                                verification_url=frame.url if hasattr(frame, 'url') else getattr(page, 'url', None),
-                                                error_message=self._get_slider_failure_message('滑块验证失败，请稍后重试'),
-                                                extra_meta={'detection_source': '_detect_qr_code_verification'},
-                                            )
-                                        else:
-                                            logger.success(f"【{self.pure_user_id}】✅ 刷新后滑块验证成功！")
-                                            self._finish_password_login_slider_risk_log(
-                                                slider_risk_log,
-                                                success=True,
-                                                verification_url=frame.url if hasattr(frame, 'url') else getattr(page, 'url', None),
-                                                processing_result='密码登录流程中的滑块验证自动处理成功（刷新后）',
-                                                extra_meta={'detection_source': '_detect_qr_code_verification'},
-                                            )
-                                            time.sleep(3)
-                                    except Exception as e:
-                                        logger.error(f"【{self.pure_user_id}】❌ 页面刷新失败: {e}")
-                                        self._finish_password_login_slider_risk_log(
-                                            slider_risk_log,
-                                            success=False,
-                                            verification_url=frame.url if hasattr(frame, 'url') else getattr(page, 'url', None),
-                                            error_message=f'页面刷新失败: {str(e)}',
-                                            extra_meta={'detection_source': '_detect_qr_code_verification'},
-                                        )
+                                    # 3次失败后不再自动整页重载，避免连续刷新把风控打紧
+                                    logger.warning(f"【{self.pure_user_id}】⚠️ 滑块处理3次都失败，停止自动刷新，交给后续验证流程处理")
+                                    self._finish_password_login_slider_risk_log(
+                                        slider_risk_log,
+                                        success=False,
+                                        verification_url=frame.url if hasattr(frame, 'url') else getattr(page, 'url', None),
+                                        error_message=self._get_slider_failure_message('滑块验证失败，请稍后重试'),
+                                        extra_meta={'detection_source': '_detect_qr_code_verification'},
+                                    )
                                 
                                 # 清理临时变量
                                 if hasattr(self, '_detected_slider_frame'):
@@ -6502,38 +6495,41 @@ class XianyuSliderStealth:
                 }
             )
 
-            try:
-                from db_manager import db_manager as _db
-                _cookie_info = _db.get_cookie_details(self.pure_user_id)
-                if _cookie_info and _cookie_info.get('value'):
-                    _cookies_to_inject = []
-                    for pair in _cookie_info['value'].split(';'):
-                        pair = pair.strip()
-                        if '=' not in pair:
-                            continue
-                        name, value = pair.split('=', 1)
-                        name = name.strip()
-                        value = value.strip()
-                        if not name:
-                            continue
-                        _cookies_to_inject.append({
-                            'name': name,
-                            'value': value,
-                            'domain': '.goofish.com',
-                            'path': '/',
-                        })
-                        if name in ('_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 'sgcookie', 'unb', 't', 'cna'):
+            if not force_clean_context:
+                try:
+                    from db_manager import db_manager as _db
+                    _cookie_info = _db.get_cookie_details(self.pure_user_id)
+                    if _cookie_info and _cookie_info.get('value'):
+                        _cookies_to_inject = []
+                        for pair in _cookie_info['value'].split(';'):
+                            pair = pair.strip()
+                            if '=' not in pair:
+                                continue
+                            name, value = pair.split('=', 1)
+                            name = name.strip()
+                            value = value.strip()
+                            if not name:
+                                continue
                             _cookies_to_inject.append({
                                 'name': name,
                                 'value': value,
-                                'domain': '.taobao.com',
+                                'domain': '.goofish.com',
                                 'path': '/',
                             })
-                    if _cookies_to_inject:
-                        context.add_cookies(_cookies_to_inject)
-                        logger.info(f"【{self.pure_user_id}】手动刷新已注入 {len(_cookies_to_inject)} 个历史 Cookie")
-            except Exception as inject_e:
-                logger.warning(f"【{self.pure_user_id}】手动刷新注入历史 Cookie 失败（不影响流程）: {inject_e}")
+                            if name in ('_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 'sgcookie', 'unb', 't', 'cna'):
+                                _cookies_to_inject.append({
+                                    'name': name,
+                                    'value': value,
+                                    'domain': '.taobao.com',
+                                    'path': '/',
+                                })
+                        if _cookies_to_inject:
+                            context.add_cookies(_cookies_to_inject)
+                            logger.info(f"【{self.pure_user_id}】手动刷新已注入 {len(_cookies_to_inject)} 个历史 Cookie")
+                except Exception as inject_e:
+                    logger.warning(f"【{self.pure_user_id}】手动刷新注入历史 Cookie 失败（不影响流程）: {inject_e}")
+            else:
+                logger.info(f"【{self.pure_user_id}】手动刷新使用真无痕上下文，已跳过历史 Cookie 注入")
 
             page = context.new_page()
             if show_browser:
@@ -6548,14 +6544,14 @@ class XianyuSliderStealth:
 
             try:
                 page.goto("https://www.goofish.com", wait_until='domcontentloaded', timeout=15000)
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(random.uniform(1.2, 2.4))
             except Exception as warmup_e:
                 logger.warning(f"【{self.pure_user_id}】手动刷新预访问失败（不影响流程）: {warmup_e}")
 
             login_url = "https://www.goofish.com/im"
             logger.info(f"【{self.pure_user_id}】手动刷新已打开页面: {login_url}")
             page.goto(login_url, wait_until='domcontentloaded', timeout=60000)
-            time.sleep(2)
+            time.sleep(random.uniform(1.4, 2.6))
             page = self._ensure_manual_refresh_login_entry(context, page)
 
             logger.info(f"【{self.pure_user_id}】请在打开的浏览器中自行选择登录/验证方式，完成后程序会自动读取 Cookie")
@@ -6732,43 +6728,8 @@ class XianyuSliderStealth:
                         'Accept-Language': browser_features['accept_lang']
                     }
                 )
-                # 注入已有 Cookie（让浏览器不是全新空白状态，降低风控检测风险）
-                try:
-                    from db_manager import db_manager as _db
-                    _cookie_info = _db.get_cookie_details(self.pure_user_id)
-                    if _cookie_info and _cookie_info.get('value'):
-                        _cookie_str = _cookie_info['value']
-                        _cookies_to_inject = []
-                        for pair in _cookie_str.split(';'):
-                            pair = pair.strip()
-                            if '=' in pair:
-                                name, value = pair.split('=', 1)
-                                name = name.strip()
-                                value = value.strip()
-                                if name:
-                                    _cookies_to_inject.append({
-                                        'name': name,
-                                        'value': value,
-                                        'domain': '.goofish.com',
-                                        'path': '/',
-                                    })
-                                    # 同时注入 taobao 域（部分 Cookie 需要跨域）
-                                    if name in ('_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 'sgcookie', 'unb', 't', 'cna'):
-                                        _cookies_to_inject.append({
-                                            'name': name,
-                                            'value': value,
-                                            'domain': '.taobao.com',
-                                            'path': '/',
-                                        })
-                        if _cookies_to_inject:
-                            context.add_cookies(_cookies_to_inject)
-                            logger.info(f"【{self.pure_user_id}】已注入 {len(_cookies_to_inject)} 个历史 Cookie 到干净上下文")
-                        else:
-                            logger.warning(f"【{self.pure_user_id}】历史 Cookie 为空，使用全新上下文")
-                    else:
-                        logger.info(f"【{self.pure_user_id}】未找到历史 Cookie，使用全新上下文")
-                except Exception as inject_e:
-                    logger.warning(f"【{self.pure_user_id}】注入历史 Cookie 失败（不影响登录）: {inject_e}")
+                # 真无痕模式：直接使用干净上下文，不注入历史 Cookie
+                logger.info(f"【{self.pure_user_id}】干净上下文已启用，跳过历史 Cookie 注入")
             else:
                 context = playwright.chromium.launch_persistent_context(
                     user_data_dir,
@@ -6810,7 +6771,7 @@ class XianyuSliderStealth:
                 try:
                     logger.info(f"【{self.pure_user_id}】预访问闲鱼首页，建立浏览历史...")
                     page.goto("https://www.goofish.com", wait_until='domcontentloaded', timeout=15000)
-                    time.sleep(random.uniform(1.0, 2.0))
+                    time.sleep(random.uniform(1.1, 2.3))
                     logger.info(f"【{self.pure_user_id}】预访问完成，当前URL: {page.url}")
                 except Exception as warmup_e:
                     logger.warning(f"【{self.pure_user_id}】预访问失败（不影响登录）: {warmup_e}")
@@ -6835,7 +6796,7 @@ class XianyuSliderStealth:
                         raise
                 
                 # 等待页面加载
-                wait_time = 2 if not show_browser else 2
+                wait_time = random.uniform(1.2, 2.2)
                 logger.info(f"【{self.pure_user_id}】等待页面加载（{wait_time}秒）...")
                 time.sleep(wait_time)
                 
@@ -6977,38 +6938,16 @@ class XianyuSliderStealth:
                                     )
                                     return self._fail_login(self._get_slider_failure_message("页面状态已变化，未找到滑块容器，请重新尝试刷新Cookie"))
 
-                                # 3次失败后，刷新页面重试
-                                logger.warning(f"【{self.pure_user_id}】⚠️ 滑块处理3次都失败，刷新页面后重试...")
-                                try:
-                                    page.reload(wait_until="domcontentloaded", timeout=30000)
-                                    logger.info(f"【{self.pure_user_id}】✅ 页面刷新完成")
-                                    time.sleep(2)
-                                    slider_success = self.solve_slider(max_retries=3)
-                                    if not slider_success:
-                                        feedback = self.last_verification_feedback or {}
-                                        if feedback.get("source") == "slider_missing":
-                                            logger.error(f"【{self.pure_user_id}】❌ 刷新后页面未出现滑块，停止重复尝试")
-                                        logger.error(f"【{self.pure_user_id}】❌ 刷新后滑块验证仍然失败")
-                                        self._finish_password_login_slider_risk_log(
-                                            slider_risk_log,
-                                            success=False,
-                                            verification_url=(detected_slider_frame.url if detected_slider_frame and hasattr(detected_slider_frame, 'url') else getattr(page, 'url', None)),
-                                            error_message=self._get_slider_failure_message("滑块验证失败，请稍后重试"),
-                                            extra_meta={'detection_source': 'login_with_password_playwright_pre_login'},
-                                        )
-                                        return self._fail_login(self._get_slider_failure_message("滑块验证失败，请稍后重试"))
-                                    else:
-                                        logger.success(f"【{self.pure_user_id}】✅ 刷新后滑块验证成功！")
-                                except Exception as e:
-                                    logger.error(f"【{self.pure_user_id}】❌ 页面刷新失败: {e}")
-                                    self._finish_password_login_slider_risk_log(
-                                        slider_risk_log,
-                                        success=False,
-                                        verification_url=(detected_slider_frame.url if detected_slider_frame and hasattr(detected_slider_frame, 'url') else getattr(page, 'url', None)),
-                                        error_message=f"页面会话已失效: {str(e)}",
-                                        extra_meta={'detection_source': 'login_with_password_playwright_pre_login'},
-                                    )
-                                    return self._fail_login("页面会话已失效，请重新尝试刷新Cookie")
+                                # 3次失败后不再自动整页重载，避免连续刷新把风控打紧
+                                logger.warning(f"【{self.pure_user_id}】⚠️ 滑块处理3次都失败，停止自动刷新，交给后续验证流程处理")
+                                self._finish_password_login_slider_risk_log(
+                                    slider_risk_log,
+                                    success=False,
+                                    verification_url=(detected_slider_frame.url if detected_slider_frame and hasattr(detected_slider_frame, 'url') else getattr(page, 'url', None)),
+                                    error_message=self._get_slider_failure_message("滑块验证失败，请稍后重试"),
+                                    extra_meta={'detection_source': 'login_with_password_playwright_pre_login'},
+                                )
+                                return self._fail_login(self._get_slider_failure_message("滑块验证失败，请稍后重试"))
                             else:
                                 logger.success(f"【{self.pure_user_id}】✅ 滑块验证成功！")
                             self._finish_password_login_slider_risk_log(

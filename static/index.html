@@ -453,7 +453,7 @@
           <i class="bi bi-hdd-network me-2"></i>
           后台管理
         </h2>
-        <p class="text-muted mb-0">只允许一个账号后台运行，降低系统占用</p>
+        <p class="text-muted mb-0">可同时管理多个账号后台，重新启动同账号会自动踢掉旧实例</p>
       </div>
       <div class="content-body">
         <div class="card mb-4">
@@ -472,7 +472,7 @@
             <div class="row g-3 mb-3">
               <div class="col-md-4">
                 <div class="border rounded p-3 h-100">
-                  <div class="text-muted small">当前后台</div>
+                  <div class="text-muted small">运行账号</div>
                   <div class="fw-bold fs-5" id="backgroundActiveAccount">加载中...</div>
                 </div>
               </div>
@@ -484,8 +484,8 @@
               </div>
               <div class="col-md-4">
                 <div class="border rounded p-3 h-100">
-                  <div class="text-muted small">限制</div>
-                  <div class="fw-bold fs-5" id="backgroundLimit">最多 1 个后台</div>
+                  <div class="text-muted small">模式</div>
+                  <div class="fw-bold fs-5" id="backgroundLimit">支持多账号后台</div>
                 </div>
               </div>
             </div>
@@ -541,9 +541,9 @@
                   </button>
                   <button type="button" class="btn btn-outline-primary btn-lg flex-fill password-login-btn" onclick="togglePasswordLogin()" style="max-width: 300px;">
                     <i class="bi bi-key me-2"></i>
-                    <span class="fw-bold">账密登录</span>
+                    <span class="fw-bold">消息页登录</span>
                     <br>
-                    <small class="opacity-75">需填写账号密码，成功后自动保存</small>
+                    <small class="opacity-75">点击后自动打开闲鱼消息登录页</small>
                   </button>
                   <button type="button" class="btn btn-outline-warning btn-lg flex-fill refresh-cookie-btn" onclick="toggleRefreshCookieForm()" style="max-width: 300px;">
                     <i class="bi bi-arrow-repeat me-2"></i>
@@ -628,28 +628,15 @@
             <div id="passwordLoginForm" style="display: none;">
               <div class="alert alert-info">
                 <i class="bi bi-info-circle me-2"></i>
-                <strong>提示：</strong>用于新增账号或重新获取 Cookie，登录成功后会自动保存账密。登录过程中可能出现滑块或人脸验证，请耐心等待。
+                <strong>提示：</strong>点击后会自动打开闲鱼消息登录页，请在弹出的浏览器里自行完成扫码、密码或其他验证，系统会自动读取并保存 Cookie。
               </div>
               <form id="passwordLoginFormElement" class="row g-3">
                 <div class="col-md-4">
                   <label for="passwordLoginAccountId" class="form-label">账号ID</label>
-                  <input type="text" class="form-control" id="passwordLoginAccountId" placeholder="唯一标识" required>
-                </div>
-                <div class="col-md-4">
-                  <label for="passwordLoginAccount" class="form-label">登录账号</label>
-                  <input type="text" class="form-control" id="passwordLoginAccount" placeholder="手机号或邮箱" required>
-                </div>
-                <div class="col-md-4">
-                  <label for="passwordLoginPassword" class="form-label">登录密码</label>
-                  <input type="password" class="form-control" id="passwordLoginPassword" placeholder="请输入密码" required>
+                  <input type="text" class="form-control" id="passwordLoginAccountId" placeholder="可留空，系统会自动命名">
                 </div>
                 <div class="col-12">
-                  <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="passwordLoginShowBrowser" value="1">
-                    <label class="form-check-label" for="passwordLoginShowBrowser">
-                      显示浏览器窗口（如果使用服务器，请勿打开该开关，会导致登录失败）
-                    </label>
-                  </div>
+                  <div class="form-text">不需要先填账号密码；点击后会直接打开闲鱼消息登录页。</div>
                 </div>
                 <div class="col-12">
                   <button type="submit" class="btn btn-primary">

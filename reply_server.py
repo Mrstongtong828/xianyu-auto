@@ -2892,6 +2892,68 @@ def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)
     return result
 
 
+@app.get("/backgrounds")
+def get_backgrounds(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取账号后台运行状态。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+
+    user_id = current_user['user_id']
+    status = cookie_manager.manager.get_background_status(user_id=user_id)
+    accounts = []
+    for account in status.get('accounts', []):
+        cookie_id = account.get('id')
+        cookie_details = db_manager.get_cookie_details(cookie_id)
+        accounts.append({
+            **account,
+            'remark': cookie_details.get('remark', '') if cookie_details else '',
+            'username': cookie_details.get('username', '') if cookie_details else '',
+            'runtime_status': _build_live_runtime_status(cookie_id),
+        })
+
+    return {
+        **status,
+        'accounts': accounts,
+    }
+
+
+@app.post("/backgrounds/{cid}/activate")
+def activate_background(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """启动或重启指定账号的后台任务。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+
+    _ensure_cookie_access(cid, current_user)
+    try:
+        cookie_manager.manager.activate_single_background(cid)
+        return {
+            'success': True,
+            'message': f'已启动/重启账号 {cid} 的后台',
+            'background_status': cookie_manager.manager.get_background_status(user_id=current_user['user_id']),
+        }
+    except Exception as e:
+        logger.error(f"启动/重启后台失败: {cid} - {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=400, detail=safe_client_error("启动后台失败，请稍后重试"))
+
+
+@app.post("/backgrounds/stop-all")
+def stop_all_backgrounds(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """停止当前用户可见的所有账号后台。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
+
+    try:
+        cookie_manager.manager.stop_all_backgrounds(update_status=True)
+        return {
+            'success': True,
+            'message': '已停止全部账号后台',
+            'background_status': cookie_manager.manager.get_background_status(user_id=current_user['user_id']),
+        }
+    except Exception as e:
+        logger.error(f"停止全部后台失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=400, detail=safe_client_error("停止后台失败，请稍后重试"))
+
+
 @app.get("/api/announcement")
 def get_dashboard_announcement(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取仪表盘公告，优先读取 GitHub 公告文件，本地文件兜底。"""
@@ -3387,7 +3449,9 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
     try:
         log_with_user('info', f"开始执行账号密码登录任务: {session_id}, 账号: {account_id}", current_user)
 
-        is_refresh_mode = password_login_sessions.get(session_id, {}).get('refresh_mode', False)
+        session_info = password_login_sessions.get(session_id, {})
+        is_refresh_mode = session_info.get('refresh_mode', False)
+        is_manual_login_mode = session_info.get('manual_login_mode', False)
         if is_refresh_mode:
             from XianyuAutoAsync import XianyuLive
             manual_refresh_state = XianyuLive.begin_manual_refresh(account_id, source=manual_refresh_owner)
@@ -3407,9 +3471,11 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
         import base64
         import io
         
+        runtime_account_id = account_id or f"manual_login_{session_id}"
+
         # 创建 XianyuSliderStealth 实例
         slider_instance = XianyuSliderStealth(
-            user_id=account_id,
+            user_id=runtime_account_id,
             enable_learning=True,
             headless=not show_browser
         )
@@ -3550,28 +3616,75 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
             from db_manager import db_manager  # 在函数开头导入，避免作用域问题
             from XianyuAutoAsync import XianyuLive
             try:
-                cookies_dict = slider_instance.login_with_password_playwright(
-                    account=account,
-                    password=password,
-                    show_browser=show_browser,
-                    notification_callback=notification_callback,
-                    force_clean_context=is_refresh_mode
-                )
+                if is_refresh_mode or is_manual_login_mode:
+                    cookies_dict = slider_instance.manual_cookie_refresh_playwright(
+                        show_browser=True,
+                        notification_callback=notification_callback,
+                        force_clean_context=True
+                    )
+                else:
+                    cookies_dict = slider_instance.login_with_password_playwright(
+                        account=account,
+                        password=password,
+                        show_browser=show_browser,
+                        notification_callback=notification_callback,
+                        force_clean_context=False
+                    )
                 
                 if cookies_dict is None:
-                    failure_message = slider_instance.last_login_error or '登录失败，请检查账号密码是否正确'
+                    failure_message = slider_instance.last_login_error or (
+                        '消息页登录失败，请在浏览器中重新尝试' if is_manual_login_mode else '登录失败，请检查账号密码是否正确'
+                    )
                     _set_password_login_session_status(session_id, 'failed', error=failure_message)
-                    log_with_user('error', f"账号密码登录失败: {account_id}, 错误: {failure_message}", current_user)
+                    failure_label = '消息页登录' if is_manual_login_mode else '账号密码登录'
+                    log_with_user('error', f"{failure_label}失败: {account_id}, 错误: {failure_message}", current_user)
                     # 更新风控日志状态
                     _update_session_risk_log(session_id, 'failed', error_message=failure_message[:200])
                     return
                 
-                log_with_user('info', f"账号密码登录成功，获取到 {len(cookies_dict)} 个Cookie字段: {account_id}", current_user)
+                success_label = '消息页登录' if is_manual_login_mode else '账号密码登录'
+                log_with_user('info', f"{success_label}成功，获取到 {len(cookies_dict)} 个Cookie字段: {account_id}", current_user)
                 
                 # 检查是否已存在相同账号ID的Cookie
                 existing_cookies = db_manager.get_all_cookies(user_id)
+                resolved_account_id = account_id
+                existing_cookie_value = existing_cookies.get(account_id, '') if account_id in existing_cookies else ''
                 is_new_account = account_id not in existing_cookies
-                existing_cookie_value = existing_cookies.get(account_id, '') if not is_new_account else ''
+
+                if is_manual_login_mode and not (resolved_account_id or '').strip():
+                    unb = (cookies_dict.get('unb') or '').strip()
+                    matched_account_id = None
+                    matched_cookie_value = None
+                    if unb:
+                        for candidate_account_id, candidate_cookie_value in existing_cookies.items():
+                            try:
+                                candidate_cookie_dict = trans_cookies(candidate_cookie_value)
+                                if candidate_cookie_dict.get('unb') == unb:
+                                    matched_account_id = candidate_account_id
+                                    matched_cookie_value = candidate_cookie_value
+                                    break
+                            except Exception:
+                                continue
+
+                    if matched_account_id:
+                        resolved_account_id = matched_account_id
+                        existing_cookie_value = matched_cookie_value or ''
+                        is_new_account = False
+                        log_with_user('info', f"消息页登录匹配到现有账号: {resolved_account_id}, UNB: {unb}", current_user)
+                    else:
+                        resolved_account_id = unb or f"manual_login_{session_id[:8]}"
+                        base_account_id = resolved_account_id
+                        suffix = 1
+                        while resolved_account_id in existing_cookies:
+                            resolved_account_id = f"{base_account_id}_{suffix}"
+                            suffix += 1
+                        existing_cookie_value = ''
+                        is_new_account = True
+                        log_with_user('info', f"消息页登录准备创建新账号: {resolved_account_id}, UNB: {unb or 'unknown'}", current_user)
+
+                    account_id = resolved_account_id
+                    password_login_sessions[session_id]['account_id'] = account_id
+
                 existing_cookie_dict = trans_cookies(existing_cookie_value) if existing_cookie_value else {}
 
                 merge_result = XianyuLive.protected_merge_cookie_dicts(existing_cookie_dict, cookies_dict)
@@ -3654,9 +3767,9 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                 update_success = db_manager.update_cookie_account_info(
                     account_id,
                     cookie_value=cookies_str,
-                    username=account,
-                    password=password,
-                    show_browser=show_browser if not is_refresh_mode else None,  # 刷新模式不更新此字段
+                    username=None if (is_refresh_mode or is_manual_login_mode) else account,
+                    password=None if (is_refresh_mode or is_manual_login_mode) else password,
+                    show_browser=show_browser if not (is_refresh_mode or is_manual_login_mode) else None,  # 刷新/消息页登录模式不更新此字段
                     user_id=user_id  # 新账号时需要提供user_id
                 )
                 
@@ -3714,6 +3827,8 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                 
                 if is_refresh_mode:
                     log_with_user('info', f"刷新模式已完成Token预检，直接切换到通过预检的新Cookie: {account_id}", current_user)
+                elif is_manual_login_mode:
+                    log_with_user('info', f"消息页登录已完成浏览器侧确认，直接保存当前 Cookie: {account_id}", current_user)
                 else:
                     # 登录成功后，调用_refresh_cookies_via_browser刷新Cookie
                     try:
@@ -3807,7 +3922,12 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         cookie_count=str(len(merged_cookies_dict))
                     )
 
-                    login_type = "刷新Cookie" if notify_refresh_mode else "密码登录"
+                    if notify_refresh_mode:
+                        login_type = "刷新Cookie"
+                    elif is_manual_login_mode:
+                        login_type = "消息页登录"
+                    else:
+                        login_type = "密码登录"
                     notification_sent = dispatch_account_notifications_sync(
                         account_id,
                         notification_message,
@@ -3824,7 +3944,8 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
             except Exception as e:
                 error_msg = str(e)
                 _set_password_login_session_status(session_id, 'failed', error=error_msg)
-                log_with_user('error', f"账号密码登录失败: {account_id}, 错误: {error_msg}", current_user)
+                failure_label = '消息页登录' if password_login_sessions.get(session_id, {}).get('manual_login_mode', False) else '账号密码登录'
+                log_with_user('error', f"{failure_label}失败: {account_id}, 错误: {error_msg}", current_user)
                 logger.info(f"会话 {session_id} 状态已更新为 failed，错误消息: {error_msg}")  # 添加日志确认状态更新
                 # 更新风控日志状态
                 _update_session_risk_log(session_id, 'failed', error_message=error_msg[:200])
@@ -3873,18 +3994,19 @@ async def password_login(
 ):
     """账号密码登录接口（异步，支持人脸认证）"""
     try:
-        account_id = request.get('account_id')
-        account = request.get('account')
-        password = request.get('password')
+        account_id = str(request.get('account_id') or '').strip()
+        account = str(request.get('account') or '').strip()
+        password = str(request.get('password') or '')
         # 检查前端是否明确指定了 show_browser 参数
         show_browser_specified = 'show_browser' in request
         show_browser = request.get('show_browser', False)
-        refresh_mode = request.get('refresh_mode', False)  # 刷新模式：从数据库读取账密
+        refresh_mode = request.get('refresh_mode', False)  # 刷新模式：打开浏览器等待用户手动验证
+        manual_login_mode = request.get('manual_login', False)
         risk_log_id = None
 
         user_id = current_user['user_id']
 
-        # 刷新模式：从数据库读取已保存的账号密码
+        # 刷新模式：只校验账号归属，不自动输入账号密码
         if refresh_mode and account_id:
             from XianyuAutoAsync import XianyuLive
             cookie_info = db_manager.get_cookie_details(account_id)
@@ -3895,25 +4017,40 @@ async def password_login(
             if cookie_info.get('user_id') != user_id:
                 return {'success': False, 'message': '无权操作此账号'}
 
-            account = cookie_info.get('username')
-            password = cookie_info.get('password')
+            account = cookie_info.get('username') or account_id
+            password = cookie_info.get('password') or ''
 
-            if not account or not password:
-                return {'success': False, 'message': '该账号未配置用户名和密码，无法刷新Cookie'}
+            # 手动刷新 Cookie 必须保留可见浏览器窗口，方便用户完成扫码/人脸验证。
+            show_browser = True
 
-            # 获取 show_browser 设置（只有当前端没有明确指定时，才使用数据库配置）
-            if not show_browser_specified:
-                show_browser = cookie_info.get('show_browser', False)
+            log_with_user('info', f"手动刷新Cookie模式: {account_id}, show_browser: {show_browser}，等待用户自行选择验证方式", current_user)
+            manual_refresh_state = XianyuLive.get_manual_refresh_state(account_id)
+            if manual_refresh_state:
+                refresh_source = str(manual_refresh_state.get('source') or '')
+                refresh_session_id = refresh_source.split(':', 1)[1] if refresh_source.startswith('password_login:') else None
+                refresh_session = password_login_sessions.get(refresh_session_id) if refresh_session_id else None
+                refresh_status = refresh_session.get('status') if refresh_session else None
 
-            log_with_user('info', f"刷新Cookie模式: {account_id}, 用户名: {account}, show_browser: {show_browser}", current_user)
+                if not refresh_session or refresh_status in {'failed', 'success'}:
+                    if XianyuLive.end_manual_refresh(account_id, source='stale_manual_refresh_cleanup'):
+                        log_with_user('info', f'检测到陈旧的手动刷新保护，已自动清理: {account_id}', current_user)
+                else:
+                    return {'success': False, 'message': f'账号 {account_id} 正在执行手动刷新，请稍候再试'}
 
-            if XianyuLive.is_manual_refresh_active(account_id):
-                return {'success': False, 'message': f'账号 {account_id} 正在执行手动刷新，请稍候再试'}
-
-        if not account_id or not account or not password:
+        if refresh_mode:
+            if not account_id:
+                return {'success': False, 'message': '账号ID不能为空'}
+        elif manual_login_mode:
+            show_browser = True
+        elif not account_id or not account or not password:
             return {'success': False, 'message': '账号ID、登录账号和密码不能为空'}
 
-        log_with_user('info', f"开始账号密码登录: {account_id}, 账号: {account}", current_user)
+        if refresh_mode:
+            log_with_user('info', f"开始手动验证刷新Cookie: {account_id}", current_user)
+        elif manual_login_mode:
+            log_with_user('info', f"开始消息页登录: {account_id or '未命名账号'}，将自动打开闲鱼消息登录页", current_user)
+        else:
+            log_with_user('info', f"开始账号密码登录: {account_id}, 账号: {account}", current_user)
         
         # 生成会话ID
         session_id = secrets.token_urlsafe(16)
@@ -3949,6 +4086,7 @@ async def password_login(
             'account': account,
             'show_browser': show_browser,
             'refresh_mode': refresh_mode,  # 保存刷新模式标志
+            'manual_login_mode': manual_login_mode,  # 保存消息页登录模式标志
             'risk_control_log_id': risk_log_id if refresh_mode else None,  # 风控日志ID
             'risk_session_id': risk_session_id,
             'status': 'processing',
@@ -3973,7 +4111,7 @@ async def password_login(
             'success': True,
             'session_id': session_id,
             'status': 'processing',
-            'message': '登录任务已启动，请等待...'
+            'message': '登录任务已启动，请等待...' if not manual_login_mode else '闲鱼消息登录页已打开，请在浏览器中完成登录'
         }
         
     except Exception as e:
