@@ -15115,6 +15115,17 @@ class XianyuLive:
             if send_user_id == self.myid and not is_system_message:
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】[{msg_id}] 【手动发出】 商品({item_id}): {send_message}")
 
+                # Web /api/chat/send 已经做过落库+publish，如果命中去重标记
+                # 说明这是闲鱼对同一条消息的回推，直接跳过避免前端看到两条。
+                try:
+                    from chat_event_hub import self_send_dedup
+                    if self_send_dedup.consume(self.cookie_id, chat_id, str(self.myid), send_message):
+                        pause_manager.pause_chat(chat_id, self.cookie_id)
+                        logger.info(f"【{self.cookie_id}】[{msg_id}] ⏹️ 处理结束（Web 自发回推已去重）")
+                        return
+                except Exception as _e:
+                    logger.debug(f"自发消息去重检查失败: {self._safe_str(_e)}")
+
                 try:
                     from db_manager import db_manager as _db
                     from chat_event_hub import publish_chat_message

@@ -11659,6 +11659,40 @@ async def chat_send_message(
             timeout=15,
         )
 
+        # 闲鱼通过 sendByReceiverScope 发出的消息，WebSocket 不会以"自己发出"形式
+        # 稳定回推给同一连接，导致前端在线客服看不到自己刚发的消息。这里仿照
+        # XianyuAutoAsync.py 手动发出分支，主动落库 + publish 一次；并 mark
+        # 去重标记，避免闲鱼真的回推时再重复一条。
+        try:
+            from chat_event_hub import publish_chat_message, self_send_dedup
+            myid = getattr(live_instance, 'myid', None) or ''
+            sender_name = cookie_id
+            try:
+                detail = db_manager.get_cookie_details(cookie_id) or {}
+                sender_name = detail.get('remark') or detail.get('username') or cookie_id
+            except Exception:
+                pass
+
+            _msg_id_db = db_manager.save_chat_message(
+                cookie_id=cookie_id, chat_id=req.chat_id,
+                sender_id=str(myid), sender_name=str(sender_name),
+                content=req.message, content_type=1,
+                image_url=None, item_id=None,
+                direction=1, reply_source='手动',
+                media_url=None, link_url=None, extra_json=None,
+            )
+            publish_chat_message(cookie_id, {
+                'msg_id': _msg_id_db, 'chat_id': req.chat_id,
+                'sender_id': str(myid), 'sender_name': str(sender_name),
+                'content': req.message, 'content_type': 1,
+                'image_url': None,
+                'item_id': None, 'direction': 1, 'reply_source': '手动',
+                'media_url': None, 'link_url': None, 'extra_json': None,
+            })
+            self_send_dedup.mark(cookie_id, req.chat_id, str(myid), req.message)
+        except Exception as e:
+            logger.debug(f"客服 Web 发送后回显落库失败: {mask_sensitive_text(e)}")
+
         return {'success': True, 'message': '发送成功'}
     except HTTPException:
         raise

@@ -60,6 +60,53 @@ class ChatEventHub:
 chat_event_hub = ChatEventHub()
 
 
+class SelfSendDedup:
+    """Web 自发消息去重标记。
+
+    Why: /api/chat/send 在调 send_msg 成功后会立刻落库+publish；但闲鱼服务器
+    随后可能把同一条消息以"自己发出"的形式经 WebSocket 回推，触发
+    XianyuAutoAsync.handle_message 再落库+publish 一次，导致前端看到两条。
+    How to apply: Web 路径 mark()，handle_message 的"手动发出"分支调 consume()，
+    命中则跳过本次落库/publish。键采用 (cookie_id, chat_id, sender_id, content)，
+    TTL 默认 60s 足以覆盖闲鱼回推延迟。
+    """
+
+    def __init__(self, ttl_seconds: float = 60.0):
+        self._lock = threading.RLock()
+        self._marks: Dict[tuple, float] = {}
+        self._ttl = ttl_seconds
+
+    def _gc_locked(self, now: float) -> None:
+        expired = [k for k, ts in self._marks.items() if now - ts > self._ttl]
+        for k in expired:
+            self._marks.pop(k, None)
+
+    @staticmethod
+    def _key(cookie_id: str, chat_id: str, sender_id: str, content: str) -> tuple:
+        return (str(cookie_id), str(chat_id), str(sender_id), str(content or ''))
+
+    def mark(self, cookie_id: str, chat_id: str, sender_id: str, content: str) -> None:
+        now = time.time()
+        with self._lock:
+            self._gc_locked(now)
+            self._marks[self._key(cookie_id, chat_id, sender_id, content)] = now
+
+    def consume(self, cookie_id: str, chat_id: str, sender_id: str, content: str) -> bool:
+        """命中返回 True 并消费掉该标记；未命中返回 False。"""
+        now = time.time()
+        key = self._key(cookie_id, chat_id, sender_id, content)
+        with self._lock:
+            self._gc_locked(now)
+            ts = self._marks.get(key)
+            if ts is None:
+                return False
+            self._marks.pop(key, None)
+            return True
+
+
+self_send_dedup = SelfSendDedup()
+
+
 def publish_chat_message(cookie_id: str, message_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """发布聊天消息事件到对应的系统用户。"""
     from db_manager import db_manager
