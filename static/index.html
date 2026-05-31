@@ -89,6 +89,12 @@
           <span>后台管理</span>
         </a>
       </div>
+      <div class="nav-item" data-menu-id="item-publish">
+        <a href="javascript:void(0)" class="nav-link" onclick="showSection('item-publish')">
+          <i class="bi bi-bag-plus"></i>
+          <span>商品发布</span>
+        </a>
+      </div>
       <div class="nav-item" data-menu-id="items">
         <a href="javascript:void(0)" class="nav-link" onclick="showSection('items')">
           <i class="bi bi-box-seam"></i>
@@ -539,6 +545,12 @@
                     <br>
                     <small class="opacity-75">适合直接添加新账号</small>
                   </button>
+                  <button type="button" class="btn btn-outline-info btn-lg me-md-2 flex-fill qr-login-lite-btn" onclick="showQRCodeLogin('lite')" style="max-width: 300px;">
+                    <i class="bi bi-qr-code-scan me-2"></i>
+                    <span class="fw-bold">轻量扫码</span>
+                    <br>
+                    <small class="opacity-75">纯 HTTP，无浏览器，秒级出码</small>
+                  </button>
                   <button type="button" class="btn btn-outline-primary btn-lg flex-fill password-login-btn" onclick="togglePasswordLogin()" style="max-width: 300px;">
                     <i class="bi bi-key me-2"></i>
                     <span class="fw-bold">账密登录</span>
@@ -666,7 +678,7 @@
             <div id="manualInputForm" style="display: none;">
               <div class="alert alert-info">
                 <i class="bi bi-info-circle me-2"></i>
-                <strong>提示：</strong>用于手动导入已有 Cookie，建议优先使用消息页 Cookie。导入后请尽快在账号设置中配置账密，便于后续刷新与恢复。
+                <strong>提示：</strong>用于手动导入已有 Cookie，并按真实浏览器链路立即验证当前滑块。建议优先使用消息页 Cookie。导入后请尽快在账号设置中配置账密，便于后续刷新与恢复。
               </div>
               <form id="addForm" class="row g-3">
                 <div class="col-md-3">
@@ -678,8 +690,16 @@
                   <input type="text" class="form-control" id="cookieValue" placeholder="完整Cookie字符串" required>
                 </div>
                 <div class="col-12">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="manualCookieShowBrowser" value="1">
+                    <label class="form-check-label" for="manualCookieShowBrowser">
+                      显示浏览器窗口（默认关闭，优先走无头验证；仅在本机排查时开启）
+                    </label>
+                  </div>
+                </div>
+                <div class="col-12">
                   <button type="submit" class="btn btn-primary">
-                    <i class="bi bi-plus-lg me-1"></i>添加账号
+                    <i class="bi bi-plus-lg me-1"></i>导入并验证账号
                   </button>
                   <button type="button" class="btn btn-secondary ms-2" onclick="toggleManualInput()">
                     <i class="bi bi-x-circle me-1"></i>取消
@@ -754,6 +774,9 @@
                 <button class="btn btn-sm btn-outline-success" onclick="openDefaultReplyManager()">
                   <i class="bi bi-chat-text me-1"></i>默认回复管理
                 </button>
+                <button class="btn btn-sm btn-outline-warning" onclick="runHistoricalAutoCommentForAllAccounts()" title="为当前账号列表执行历史订单补评价">
+                  <i class="bi bi-star-fill me-1"></i>历史补评
+                </button>
                 <button class="btn btn-sm btn-outline-primary" onclick="loadCookies()">
                   <i class="bi bi-arrow-clockwise me-1"></i>刷新
                 </button>
@@ -765,23 +788,23 @@
               <table class="table table-hover text-center" id="cookieTable">
                 <thead>
                   <tr>
-                    <th style="width: 8%">账号ID</th>
-                    <th style="width: 10%">Cookie值</th>
-                    <th style="width: 6%">关键词</th>
-                    <th style="width: 6%">状态</th>
-                    <th style="width: 8%">默认回复</th>
-                    <th style="width: 6%">AI回复</th>
-                    <th style="width: 9%">自动确认发货</th>
+                    <th style="width: 7%">账号ID</th>
+                    <th style="width: 8%">Cookie值</th>
+                    <th style="width: 5%">关键词</th>
+                    <th style="width: 5%">状态</th>
+                    <th style="width: 7%">默认回复</th>
+                    <th style="width: 5%">AI回复</th>
+                    <th style="width: 8%">自动确认发货</th>
                     <th style="width: 7%">自动好评</th>
-                    <th style="width: 11%">备注</th>
-                    <th style="width: 11%; white-space: nowrap;">
+                    <th style="width: 9%">备注</th>
+                    <th style="width: 9%; white-space: nowrap;">
                       暂停时间
                       <i class="bi bi-question-circle ms-1"
                          data-bs-toggle="tooltip"
                          data-bs-placement="top"
                          title="检测到手动发出消息后，自动回复暂停的时间长度（分钟）。设置为0表示不暂停。如果在暂停期间再次手动发出消息，会重新开始计时。"></i>
                     </th>
-                    <th style="width: 18%">操作</th>
+                    <th style="width: 30%; min-width: 340px;">操作</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -840,6 +863,47 @@
               </div>
             </div>
 
+            <div id="risk-control-settings" class="card mt-4" style="display: none;">
+              <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <div>
+                  <span class="fw-semibold"><i class="bi bi-moon-stars me-2"></i>风控降频设置</span>
+                  <div class="text-muted small mt-1">管理员可为夜间低活跃时段单独降低保活与 Cookie 刷新频率。</div>
+                </div>
+                <span class="badge bg-warning">管理员专用</span>
+              </div>
+              <div class="card-body">
+                <div class="row g-3 align-items-end">
+                  <div class="col-md-4">
+                    <div class="form-check form-switch mt-2">
+                      <input class="form-check-input" type="checkbox" id="riskControlNightModeEnabled">
+                      <label class="form-check-label" for="riskControlNightModeEnabled">
+                        <strong>启用夜间风控降频</strong>
+                      </label>
+                    </div>
+                    <div class="form-text">
+                      仅降低 token/session 保活与 Cookie 刷新频率，不影响 WebSocket 心跳和消息接收。
+                    </div>
+                  </div>
+                  <div class="col-md-3">
+                    <label for="riskControlNightStartHour" class="form-label">开始小时</label>
+                    <input type="number" class="form-control" id="riskControlNightStartHour" min="0" max="23" step="1" value="1">
+                    <div class="form-text">取值范围 0-23</div>
+                  </div>
+                  <div class="col-md-3">
+                    <label for="riskControlNightEndHour" class="form-label">结束小时</label>
+                    <input type="number" class="form-control" id="riskControlNightEndHour" min="0" max="23" step="1" value="6">
+                    <div class="form-text">支持跨天，例如 23 到 5</div>
+                  </div>
+                  <div class="col-md-2 d-grid">
+                    <button type="button" class="btn btn-primary" onclick="saveRiskControlNightSettings()">
+                      <i class="bi bi-check-circle me-1"></i>保存设置
+                    </button>
+                  </div>
+                </div>
+                <div id="riskControlNightSettingsStatus" class="alert alert-info mt-3 mb-0 d-none"></div>
+              </div>
+            </div>
+
             <div class="about-history-panel account-diagnostics-history-panel mt-4">
               <div class="account-diagnostics-section-head">
                 <div>
@@ -871,6 +935,200 @@
                     <div class="about-placeholder-title">暂无历史消息</div>
                     <div class="about-placeholder-sub">输入会话 ID 后即可查询并展示最近的历史消息。</div>
                   </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="item-publish-section" class="content-section">
+      <div class="content-header">
+        <h2 class="mb-0">
+          <i class="bi bi-bag-plus me-2"></i>
+          商品发布
+        </h2>
+        <p class="text-muted mb-0">选择账号填写商品信息，发布成功后会自动同步到商品管理列表</p>
+      </div>
+
+      <div class="content-body">
+        <div class="row g-4 item-publish-layout">
+          <div class="col-xl-8">
+            <div class="card item-publish-form-card">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                  <h5 class="mb-1">发布表单</h5>
+                  <div class="text-muted small">第一版支持单商品发布、多图上传、价格与运费配置。</div>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                  <span class="badge text-bg-light border" id="publishMaterialModeBadge">新建素材</span>
+                  <span class="badge text-bg-light border">单商品</span>
+                </div>
+              </div>
+              <div class="card-body">
+                <form id="itemPublishForm" onsubmit="submitItemPublishForm(); return false;">
+                  <div class="row g-3">
+                    <div class="col-md-6">
+                      <label for="publishCookieId" class="form-label">发布账号</label>
+                      <select class="form-select" id="publishCookieId" required>
+                        <option value="">请选择账号</option>
+                      </select>
+                    </div>
+                    <div class="col-md-6">
+                      <label for="publishDeliveryChoice" class="form-label">运费方式</label>
+                      <select class="form-select" id="publishDeliveryChoice" onchange="handlePublishDeliveryChoiceChange()" required>
+                        <option value="包邮">包邮</option>
+                        <option value="按距离计费">按距离计费</option>
+                        <option value="一口价">一口价</option>
+                        <option value="无需邮寄">无需邮寄</option>
+                      </select>
+                    </div>
+
+                    <div class="col-12">
+                      <label for="publishTitle" class="form-label">商品标题</label>
+                      <input type="text" class="form-control" id="publishTitle" maxlength="60" placeholder="输入商品标题" required>
+                    </div>
+
+                    <div class="col-12">
+                      <label for="publishDescription" class="form-label">商品描述</label>
+                      <textarea class="form-control" id="publishDescription" rows="5" maxlength="5000" placeholder="输入商品描述，建议包含成色、规格、发货说明等信息" required></textarea>
+                    </div>
+
+                    <div class="col-md-4">
+                      <label for="publishCurrentPrice" class="form-label">现价</label>
+                      <div class="input-group">
+                        <span class="input-group-text">¥</span>
+                        <input type="number" class="form-control" id="publishCurrentPrice" min="0" step="0.01" placeholder="留空则使用默认价">
+                      </div>
+                    </div>
+
+                    <div class="col-md-4">
+                      <label for="publishOriginalPrice" class="form-label">原价</label>
+                      <div class="input-group">
+                        <span class="input-group-text">¥</span>
+                        <input type="number" class="form-control" id="publishOriginalPrice" min="0" step="0.01" placeholder="可选">
+                      </div>
+                    </div>
+
+                    <div class="col-md-4" id="publishPostPriceWrap" style="display: none;">
+                      <label for="publishPostPrice" class="form-label">邮费</label>
+                      <div class="input-group">
+                        <span class="input-group-text">¥</span>
+                        <input type="number" class="form-control" id="publishPostPrice" min="0" step="0.01" placeholder="请输入邮费">
+                      </div>
+                    </div>
+
+                    <div class="col-12">
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="publishCanSelfPickup">
+                        <label class="form-check-label" for="publishCanSelfPickup">支持买家自提</label>
+                      </div>
+                    </div>
+
+                    <div class="col-12">
+                      <label for="publishImages" class="form-label">商品图片</label>
+                      <input
+                        type="file"
+                        class="form-control"
+                        id="publishImages"
+                        accept="image/*"
+                        multiple
+                        onchange="handlePublishImagesChange()"
+                        required
+                      >
+                      <div class="form-text" id="publishImageSummary">请上传 1-9 张图片，建议首图清晰展示商品主体。</div>
+                    </div>
+
+                    <div class="col-12">
+                      <div id="publishImagePreviewList" class="item-publish-preview-list">
+                        <div class="item-publish-preview-empty">尚未选择图片</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="d-flex flex-wrap gap-2 mt-4">
+                    <button type="submit" class="btn btn-primary" id="itemPublishSubmitBtn">
+                      <i class="bi bi-cloud-upload me-1"></i>发布商品
+                    </button>
+                    <button type="button" class="btn btn-outline-success" id="itemPublishSaveMaterialBtn" onclick="saveItemPublishMaterial()">
+                      <i class="bi bi-save me-1"></i>保存素材
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="document.getElementById('itemPublishForm').reset(); clearItemPublishForm(false);">
+                      <i class="bi bi-arrow-counterclockwise me-1"></i>重置表单
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="startNewItemPublishMaterial()">
+                      <i class="bi bi-plus-circle me-1"></i>新建素材
+                    </button>
+                    <button type="button" class="btn btn-outline-dark" onclick="showSection('items')">
+                      <i class="bi bi-box-seam me-1"></i>查看商品管理
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-xl-4">
+            <div class="card item-publish-guide-card">
+              <div class="card-header">
+                <h5 class="mb-0">发布说明</h5>
+              </div>
+              <div class="card-body">
+                <div class="item-publish-guide-list">
+                  <div class="item-publish-guide-item">
+                    <span class="item-publish-guide-index">1</span>
+                    <div>优先选择启用中的账号进行发布，发布时会自动读取该账号默认地址。</div>
+                  </div>
+                  <div class="item-publish-guide-item">
+                    <span class="item-publish-guide-index">2</span>
+                    <div>图片会直接上传到闲鱼 CDN，发布成功后系统会自动同步最新商品列表。</div>
+                  </div>
+                  <div class="item-publish-guide-item">
+                    <span class="item-publish-guide-index">3</span>
+                    <div>现价可留空使用默认价格；填写原价时，必须同时填写现价。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card item-publish-result-card mt-4" id="publishResultPanel" style="display: none;">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">发布结果</h5>
+                <span class="badge" id="publishResultBadge">处理中</span>
+              </div>
+              <div class="card-body">
+                <div class="mb-2 fw-semibold" id="publishResultTitle">等待发布</div>
+                <div class="text-muted small mb-3" id="publishResultMessage">提交后这里会展示发布结果和同步状态。</div>
+                <div id="publishResultMeta" class="item-publish-result-meta"></div>
+              </div>
+            </div>
+
+            <div class="card item-publish-material-card mt-4">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">素材库</h5>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadItemPublishMaterials()">
+                  <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                </button>
+              </div>
+              <div class="card-body">
+                <div id="publishMaterialList" class="item-publish-side-list">
+                  <div class="item-publish-preview-empty">暂无素材</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card item-publish-log-card mt-4">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">发布记录</h5>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadItemPublishLogs()">
+                  <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                </button>
+              </div>
+              <div class="card-body">
+                <div id="publishLogList" class="item-publish-side-list">
+                  <div class="item-publish-preview-empty">暂无发布记录</div>
                 </div>
               </div>
             </div>
@@ -2258,11 +2516,27 @@
           <i class="bi bi-file-text me-2"></i>
           日志管理
         </h2>
-        <p class="text-muted mb-0">实时显示系统日志，支持自动刷新和统计分析</p>
+        <p class="text-muted mb-0">集中查看系统运行日志和后台任务执行记录</p>
       </div>
 
       <div class="content-body">
-        <!-- 日志控制面板 -->
+        <div class="log-center-tabs-wrap mb-4">
+          <ul class="nav nav-pills log-center-tabs" role="tablist" aria-label="日志类型切换">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link active" id="systemLogsTab" type="button" role="tab" aria-selected="true" onclick="switchLogCenterTab('system')">
+                <i class="bi bi-terminal me-1"></i>系统运行日志
+              </button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" id="taskLogsTab" type="button" role="tab" aria-selected="false" onclick="switchLogCenterTab('task')">
+                <i class="bi bi-list-task me-1"></i>任务日志
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <div id="systemLogsPane" class="log-center-pane active">
+          <!-- 日志控制面板 -->
         <div class="card mb-4">
           <div class="card-header d-flex justify-content-between align-items-center">
             <h5 class="mb-0">
@@ -2378,6 +2652,130 @@
             <div id="noSystemLogs" class="text-center py-4" style="display: none;">
               <i class="bi bi-file-text" style="font-size: 3rem; color: #ccc;"></i>
               <p class="mt-2 text-muted">暂无日志数据</p>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <div id="taskLogsPane" class="log-center-pane">
+          <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <h5 class="mb-0">
+                <i class="bi bi-funnel"></i> 任务日志筛选
+              </h5>
+              <small class="text-muted" id="taskLogsLastUpdate">最后更新: -</small>
+            </div>
+            <div class="card-body">
+              <div class="row g-3 align-items-end">
+                <div class="col-md-3">
+                  <label class="form-label">任务类型</label>
+                  <select class="form-select" id="taskLogTypeFilter" onchange="loadTaskLogs()">
+                    <option value="all" selected>全部任务</option>
+                    <option value="auto_comment">自动评价</option>
+                    <option value="auto_red_flower">求小红花</option>
+                    <option value="item_polish">商品擦亮</option>
+                    <option value="login_renew">登录续期</option>
+                    <option value="cookie_refresh">Cookie刷新</option>
+                    <option value="other_task">其他任务</option>
+                  </select>
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label">状态</label>
+                  <select class="form-select" id="taskLogStatusFilter" onchange="renderTaskLogs()">
+                    <option value="all" selected>全部状态</option>
+                    <option value="success">成功</option>
+                    <option value="failed">失败</option>
+                    <option value="skipped">已跳过</option>
+                    <option value="cookie_expired">Cookie/Session过期</option>
+                    <option value="processing">处理中</option>
+                  </select>
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label">账号</label>
+                  <select class="form-select" id="taskLogCookieFilter" onchange="loadTaskLogs()">
+                    <option value="">全部账号</option>
+                  </select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">显示数量</label>
+                  <select class="form-select" id="taskLogLimit" onchange="loadTaskLogs()">
+                    <option value="50">50条</option>
+                    <option value="100" selected>100条</option>
+                    <option value="200">200条</option>
+                    <option value="500">500条</option>
+                  </select>
+                </div>
+                <div class="col-md-1">
+                  <button class="btn btn-primary w-100" onclick="loadTaskLogs()" title="刷新任务日志">
+                    <i class="bi bi-arrow-clockwise"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row g-3 mb-4">
+            <div class="col-md-3">
+              <div class="task-log-stat-card">
+                <span class="task-log-stat-label">总记录</span>
+                <strong id="taskLogTotalCount">0</strong>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="task-log-stat-card success">
+                <span class="task-log-stat-label">成功</span>
+                <strong id="taskLogSuccessCount">0</strong>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="task-log-stat-card danger">
+                <span class="task-log-stat-label">失败</span>
+                <strong id="taskLogFailedCount">0</strong>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="task-log-stat-card muted">
+                <span class="task-log-stat-label">跳过/过期</span>
+                <strong id="taskLogSkippedCount">0</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <h5 class="mb-0">
+                <i class="bi bi-list-check"></i> 任务日志
+              </h5>
+              <span class="text-muted small">聚合自动评价、求小红花等后台任务记录</span>
+            </div>
+            <div class="card-body p-0">
+              <div id="loadingTaskLogs" class="text-center py-4" style="display: none;">
+                <div class="spinner-border" role="status">
+                  <span class="visually-hidden">加载中...</span>
+                </div>
+                <p class="mt-2">正在加载任务日志...</p>
+              </div>
+              <div class="table-responsive task-log-table-wrap">
+                <table class="table table-hover align-middle mb-0" id="taskLogsTable" style="display: none;">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>类型</th>
+                      <th>账号</th>
+                      <th>订单/对象</th>
+                      <th>买家</th>
+                      <th>状态</th>
+                      <th>说明</th>
+                      <th>批次</th>
+                    </tr>
+                  </thead>
+                  <tbody id="taskLogsTableBody"></tbody>
+                </table>
+              </div>
+              <div id="noTaskLogs" class="text-center py-5" style="display: none;">
+                <i class="bi bi-journal-text" style="font-size: 3rem; color: #ccc;"></i>
+                <p class="mt-2 text-muted mb-0">暂无任务日志</p>
+              </div>
             </div>
           </div>
         </div>
@@ -2687,59 +3085,100 @@
 
     <!-- 在线客服内容 -->
     <div id="online-im-section" class="content-section">
-      <div class="content-header" style="flex-shrink: 0;">
-        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <div>
-            <h2 class="mb-0">
-              <i class="bi bi-headset me-2"></i>
-              在线客服
-            </h2>
-            <p class="text-muted mb-0">内嵌闲鱼IM页面，快速处理客户咨询</p>
-          </div>
-          <div class="d-flex align-items-center gap-2 flex-wrap">
-            <select class="form-select form-select-sm" id="imAccountSelect" style="width: auto; min-width: 150px;" onchange="onImAccountChange()">
-              <option value="">-- 选择账号 --</option>
-            </select>
-            <!-- 账号密码信息显示在选择框旁边 -->
-            <div id="imAccountInfoBar" class="d-flex flex-column gap-1">
-              <div class="d-flex align-items-center gap-1">
-                <span class="text-muted small">账号:</span>
-                <code id="imDisplayUsername" class="bg-light px-2 py-1 rounded small text-center" style="min-width: 120px; display: inline-block;">-</code>
-                <button class="btn btn-link btn-sm p-0 text-primary" onclick="copyImUsername()" title="复制账号">
-                  <i class="bi bi-clipboard"></i>
-                </button>
-              </div>
-              <div class="d-flex align-items-center gap-1">
-                <span class="text-muted small">密码:</span>
-                <code id="imDisplayPassword" class="bg-light px-2 py-1 rounded small text-center" style="min-width: 120px; display: inline-block;">-</code>
-                <button class="btn btn-link btn-sm p-0 text-primary" onclick="copyImPassword()" title="复制密码">
-                  <i class="bi bi-clipboard"></i>
-                </button>
-              </div>
-            </div>
-            <button class="btn btn-sm btn-outline-secondary" onclick="loadImAccountList()" title="刷新账号列表">
-              <i class="bi bi-arrow-clockwise"></i>
-            </button>
-            <button class="btn btn-sm btn-outline-success" onclick="refreshImIframe()" title="刷新页面">
-              <i class="bi bi-arrow-repeat"></i> 刷新
-            </button>
-            <button class="btn btn-sm btn-success" onclick="openGoofishImNewWindow()" title="在新窗口打开">
-              <i class="bi bi-box-arrow-up-right"></i> 新窗口
-            </button>
-          </div>
-        </div>
+      <div class="content-header">
+        <h2 class="mb-0">
+          <i class="bi bi-headset me-2"></i>
+          在线客服
+        </h2>
+        <p class="text-muted mb-0">自建聊天界面，支持会话浏览、实时收发与商品回复联动</p>
       </div>
       <div class="content-body p-0" style="flex: 1; overflow: hidden;">
-        <!-- 内嵌闲鱼IM iframe -->
-        <div class="im-iframe-container" style="height: 100%;">
-          <iframe
-            id="goofishImIframe"
-            src="about:blank"
-            data-src="https://www.goofish.com/im"
-            style="width: 100%; height: 100%; border: none;"
-            allow="microphone; camera; clipboard-read; clipboard-write"
-            sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
-          ></iframe>
+        <div class="d-flex h-100" id="chatContainer">
+          <div class="chat-account-list" id="chatAccountList">
+            <div class="chat-panel-header">
+              <span>账号列表</span>
+              <button class="btn btn-link btn-sm p-0" onclick="refreshChatAccounts()" title="刷新"><i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+            <div class="chat-panel-body" id="chatAccountsBody">
+              <div class="text-center text-muted py-4 small">加载中...</div>
+            </div>
+          </div>
+          <div class="chat-session-list" id="chatSessionList">
+            <div class="chat-panel-header">
+              <span>会话列表</span>
+              <button class="btn btn-link btn-sm p-0" onclick="refreshChatSessions()" title="刷新"><i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+            <div class="p-2 border-bottom">
+              <input type="text" class="form-control form-control-sm" id="chatSearchInput" placeholder="搜索会话..." oninput="filterChatSessions()">
+            </div>
+            <div class="chat-panel-body" id="chatSessionsBody">
+              <div class="text-center text-muted py-4 small">请先选择账号</div>
+            </div>
+          </div>
+          <div class="chat-main-area" id="chatMainArea">
+            <div class="chat-main-placeholder d-flex flex-column align-items-center justify-content-center h-100 text-muted" id="chatMainPlaceholder">
+              <i class="bi bi-chat-square-text" style="font-size: 3rem;"></i>
+              <p class="mt-2">请选择一个会话查看聊天记录</p>
+            </div>
+            <div class="chat-active-area d-none" id="chatActiveArea">
+              <div class="d-flex h-100">
+                <div class="chat-msg-panel">
+                  <div class="chat-header border-bottom px-3 py-2 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong id="chatHeaderName">-</strong>
+                      <small class="text-muted ms-2" id="chatHeaderItemId"></small>
+                      <div class="small text-muted mt-1" id="chatHeaderMeta"></div>
+                    </div>
+                    <div class="d-flex gap-1">
+                      <button class="btn btn-sm btn-outline-secondary" onclick="loadMoreChatMessages()" title="加载更多"><i class="bi bi-clock-history"></i></button>
+                      <button class="btn btn-sm btn-outline-primary" onclick="toggleReplyPanel()" title="商品回复" id="btnToggleReply"><i class="bi bi-chat-right-text"></i></button>
+                    </div>
+                  </div>
+                  <div class="chat-messages-area" id="chatMessagesArea"></div>
+                  <div class="chat-input-area border-top p-2">
+                    <div class="d-flex gap-2">
+                      <textarea class="form-control form-control-sm" id="chatInputBox" rows="2" placeholder="输入消息... (Enter发送, Shift+Enter换行)" onkeydown="handleChatInputKeydown(event)"></textarea>
+                      <button class="btn btn-primary btn-sm align-self-end" onclick="sendChatMessage()" id="chatSendBtn" style="min-width: 60px;">发送</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="chat-reply-panel d-none" id="chatReplyPanel">
+                  <div class="chat-panel-header">
+                    <span>商品回复设置</span>
+                    <button class="btn btn-link btn-sm p-0" onclick="toggleReplyPanel()" title="关闭"><i class="bi bi-x-lg"></i></button>
+                  </div>
+                  <div class="chat-reply-body" id="chatReplyBody">
+                    <div class="p-3">
+                      <div class="mb-3">
+                        <label class="form-label fw-bold small">当前商品</label>
+                        <div class="input-group input-group-sm">
+                          <span class="input-group-text">ID</span>
+                          <input type="text" class="form-control" id="replyItemId" readonly>
+                        </div>
+                      </div>
+                      <div class="mb-3">
+                        <label class="form-label fw-bold small">指定商品回复 <span class="text-muted fw-normal">(优先级最高)</span></label>
+                        <textarea class="form-control form-control-sm" id="replyItemReply" rows="2" placeholder="输入该商品的固定回复..."></textarea>
+                      </div>
+                      <div class="mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                          <label class="form-label fw-bold small mb-0">商品关键词</label>
+                          <button class="btn btn-outline-primary btn-sm" onclick="addKeywordRow()" style="font-size:11px;"><i class="bi bi-plus"></i> 添加</button>
+                        </div>
+                        <div id="replyKeywordsList"></div>
+                      </div>
+                      <button class="btn btn-primary btn-sm w-100 mb-3" onclick="saveItemKeywords()"><i class="bi bi-check-lg me-1"></i>保存回复设置</button>
+                      <div class="border-top pt-3">
+                        <label class="form-label fw-bold small">一键复用到其他商品</label>
+                        <div id="copyTargetItems" class="mb-2" style="max-height: 150px; overflow-y: auto;"></div>
+                        <button class="btn btn-outline-success btn-sm w-100" onclick="copyKeywordsToSelected()"><i class="bi bi-files me-1"></i>复制到选中商品</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -3497,7 +3936,7 @@
       <div class="modal-content">
         <div class="modal-header bg-success text-white">
           <h5 class="modal-title">
-            <i class="bi bi-qr-code me-2"></i>扫码登录闲鱼账号
+            <i class="bi bi-qr-code me-2"></i><span id="qrLoginModalTitleText">扫码登录闲鱼账号</span>
           </h5>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
         </div>

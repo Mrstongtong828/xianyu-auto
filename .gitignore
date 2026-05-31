@@ -296,12 +296,13 @@ build/
 !CONTRIBUTING.md
 !SECURITY.md
 !LICENSE.md
-!docs/*.md
 
 # 临时配置文件
 *.local.yml
 *.dev.yml
 *.test.yml
+tmp_remote_debug/
+debug_*.jpg
 config.*.yml
 !global_config.yml
 
@@ -351,7 +352,7 @@ stats.log
 # 加密相关文件（保留项目核心文件，只忽略临时解密文件）
 # *_decrypted.py  # 注释掉，因为项目中有重要的解密文件
 # *_ultra.py      # 注释掉，因为项目中有重要的ultra文件
-item_polish_module.py
+secure_item_polish_ultra.py
 
 # 临时脚本文件
 temp_*.py
@@ -812,3 +813,4 @@ utils/ws_utils.py
 secure_confirm_ultra.py
 secure_freeshipping_ultra.py
 test_php_stats.py
+.playwright-browsers/

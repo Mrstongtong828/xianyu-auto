@@ -122,6 +122,25 @@ YIFAN_API = config.get('YIFAN_API', {
     'callback_url': 'http://116.196.116.76/yifan.php',
     'query_url': 'http://116.196.116.76/yifan.php'
 })
+RISK_CONTROL = config.get('RISK_CONTROL', {
+    'night_mode_enabled': False,
+    'night_start_hour': 1,
+    'night_end_hour': 6,
+    'qr_login_grace_minutes': 15,
+    'night_keepalive_multiplier': 3,
+    'night_cookie_refresh_multiplier': 2,
+    'backoff_escalation_factor': 1.5,
+    'backoff_max_cap_seconds': 3600,
+    'consecutive_failure_protection_threshold': 5,
+    'post_slider_retry_delay_min': 5.0,
+    'post_slider_retry_delay_max': 10.0,
+    'token_refresh_dedup_window_seconds': 60,
+    'token_retry_min_wait_seconds': 180,
+    'max_post_slider_session_retries': 1,
+    'soft_auth_token_preflight_enabled': True,
+    'soft_auth_token_preflight_timeout_seconds': 5.0,
+    'soft_auth_token_preflight_qr_enabled': False,
+})
 _cookies_raw = config.get('COOKIES', [])
 if isinstance(_cookies_raw, list):
     COOKIES_LIST = _cookies_raw
