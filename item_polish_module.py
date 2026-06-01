@@ -1,12 +1,15 @@
 import asyncio
 import json
-import random
 import time
 from typing import Any
 
 from loguru import logger
 
+from db_manager import db_manager
+from risk_governor import create_risk_governor
 from utils.xianyu_utils import generate_sign, trans_cookies
+
+risk_governor = create_risk_governor(db_manager)
 
 
 class ItemPolishModule:
@@ -60,6 +63,14 @@ class ItemPolishModule:
 
     async def polish_item(self, item_id: Any, retry_count: int = 0) -> dict[str, Any]:
         """擦亮单个商品。"""
+        decision = risk_governor.check(self.runtime.cookie_id, "item_polish")
+        if not decision.allowed:
+            return {
+                'success': False,
+                'item_id': str(item_id),
+                'error': f"风控保护跳过擦亮：{decision.reason or decision.status}",
+                'risk_status': decision.status,
+            }
         if retry_count >= 4:
             logger.error(f"【{self.runtime.cookie_id}】擦亮商品 {item_id} 失败，重试次数过多")
             return {'success': False, 'item_id': str(item_id), 'error': '重试次数过多'}
@@ -83,6 +94,7 @@ class ItemPolishModule:
 
                 if 'SUCCESS' in ret_msg or '调用成功' in ret_msg:
                     logger.info(f"【{self.runtime.cookie_id}】擦亮商品 {item_id} 成功")
+                    risk_governor.record_success(self.runtime.cookie_id, "item_polish")
                     return {'success': True, 'item_id': str(item_id)}
 
                 if (
@@ -91,17 +103,20 @@ class ItemPolishModule:
                     or 'token' in ret_msg.lower()
                 ):
                     logger.warning(f"【{self.runtime.cookie_id}】Token失效，准备重试擦亮商品 {item_id}: {ret_msg}")
-                    await asyncio.sleep(0.5)
+                    risk_governor.record_failure(self.runtime.cookie_id, "item_polish", ret_msg)
+                    await asyncio.sleep(risk_governor.jitter_delay("item_polish"))
                     return await self.polish_item(item_id, retry_count + 1)
 
                 logger.warning(f"【{self.runtime.cookie_id}】擦亮商品 {item_id} 失败: {ret_msg}")
                 if retry_count == 0:
                     return await self._polish_item_backup(item_id)
+                risk_governor.record_failure(self.runtime.cookie_id, "item_polish", ret_msg)
                 return {'success': False, 'item_id': str(item_id), 'error': ret_msg}
 
         except Exception as exc:
             logger.error(f"【{self.runtime.cookie_id}】擦亮商品 {item_id} 异常: {self.runtime._safe_str(exc)}")
-            await asyncio.sleep(0.5)
+            risk_governor.record_failure(self.runtime.cookie_id, "item_polish", exc)
+            await asyncio.sleep(risk_governor.jitter_delay("item_polish"))
             return await self.polish_item(item_id, retry_count + 1)
 
     async def _polish_item_backup(self, item_id: Any) -> dict[str, Any]:
@@ -125,13 +140,16 @@ class ItemPolishModule:
 
                 if 'SUCCESS' in ret_msg or '调用成功' in ret_msg:
                     logger.info(f"【{self.runtime.cookie_id}】备用API擦亮商品 {item_id} 成功")
+                    risk_governor.record_success(self.runtime.cookie_id, "item_polish")
                     return {'success': True, 'item_id': str(item_id)}
 
                 logger.warning(f"【{self.runtime.cookie_id}】备用API擦亮商品 {item_id} 失败: {ret_msg}")
+                risk_governor.record_failure(self.runtime.cookie_id, "item_polish", ret_msg)
                 return {'success': False, 'item_id': str(item_id), 'error': ret_msg}
 
         except Exception as exc:
             logger.error(f"【{self.runtime.cookie_id}】备用API擦亮商品 {item_id} 异常: {self.runtime._safe_str(exc)}")
+            risk_governor.record_failure(self.runtime.cookie_id, "item_polish", exc)
             return {'success': False, 'item_id': str(item_id), 'error': str(exc)}
 
     async def polish_all_items(self) -> dict[str, Any]:
@@ -170,6 +188,7 @@ class ItemPolishModule:
             if not item_id:
                 continue
 
+            await risk_governor.wait_before_action(self.runtime.cookie_id, "item_polish")
             result = await self.polish_item(item_id)
             results.append(result)
 
@@ -181,7 +200,7 @@ class ItemPolishModule:
             logger.info(f"【{self.runtime.cookie_id}】擦亮进度: {index + 1}/{total}, 成功: {polished}, 失败: {failed}")
 
             if index < total - 1:
-                await asyncio.sleep(random.uniform(1, 3))
+                await asyncio.sleep(risk_governor.jitter_delay("item_polish"))
 
         logger.info(f"【{self.runtime.cookie_id}】擦亮完成: 总计 {total}, 成功 {polished}, 失败 {failed}")
         return {

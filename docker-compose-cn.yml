@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile-cn
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-python:3.11-slim-bookworm}
+        APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
     image: xianyu-auto-reply-fix:latest
     container_name: xianyu-auto-reply-fix
     restart: unless-stopped

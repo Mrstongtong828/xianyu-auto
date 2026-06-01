@@ -581,6 +581,35 @@ class DBManager:
                 self._execute_sql(cursor, "ALTER TABLE item_info ADD COLUMN multi_quantity_delivery BOOLEAN DEFAULT FALSE")
                 logger.info("item_info 表 multi_quantity_delivery 列添加完成")
 
+            # 创建商品发布任务表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS item_publish_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                price TEXT DEFAULT '',
+                category_keyword TEXT DEFAULT '',
+                status TEXT DEFAULT 'draft',
+                publish_url TEXT DEFAULT '',
+                images_json TEXT DEFAULT '[]',
+                image_count INTEGER DEFAULT 0,
+                platform_item_id TEXT DEFAULT '',
+                matched_item_ids TEXT DEFAULT '[]',
+                browser_screenshot TEXT DEFAULT '',
+                error_message TEXT DEFAULT '',
+                error_details TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                started_at TEXT DEFAULT '',
+                confirmed_at TEXT DEFAULT '',
+                finished_at TEXT DEFAULT '',
+                FOREIGN KEY (account_id) REFERENCES cookies(id) ON DELETE CASCADE
+            )
+            ''')
+
             # 创建自动发货规则表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS delivery_rules (
@@ -825,6 +854,24 @@ class DBManager:
             )
             ''')
 
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS account_risk_states (
+                cookie_id TEXT PRIMARY KEY,
+                paused INTEGER DEFAULT 0,
+                pause_reason TEXT DEFAULT '',
+                paused_at REAL,
+                consecutive_failures INTEGER DEFAULT 0,
+                last_failure_at REAL,
+                last_failure_reason TEXT DEFAULT '',
+                last_success_at REAL,
+                last_action_at REAL,
+                next_allowed_at TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at REAL,
+                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
+            )
+            ''')
+
             # 创建通知模板表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS notification_templates (
@@ -1020,6 +1067,7 @@ Cookie数量: {cookie_count}
             self._ensure_scheduled_red_flower_logs_table(cursor)
             self._ensure_scheduled_task_logs_table(cursor)
             self._ensure_product_publish_tables(cursor)
+            self._ensure_account_risk_states_table(cursor)
 
             # 迁移notification_templates表以支持新的模板类型
             self._migrate_notification_templates(cursor)
@@ -1149,6 +1197,27 @@ Cookie数量: {cookie_count}
         self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_scheduled_red_flower_logs_cookie_time ON scheduled_red_flower_logs(cookie_id, created_at DESC)")
         self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_scheduled_red_flower_logs_batch ON scheduled_red_flower_logs(batch_id)")
         self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_scheduled_red_flower_logs_order ON scheduled_red_flower_logs(order_id)")
+
+    def _ensure_account_risk_states_table(self, cursor):
+        """Persist account-level risk pause and cooldown state."""
+        self._execute_sql(cursor, '''
+        CREATE TABLE IF NOT EXISTS account_risk_states (
+            cookie_id TEXT PRIMARY KEY,
+            paused INTEGER DEFAULT 0,
+            pause_reason TEXT DEFAULT '',
+            paused_at REAL,
+            consecutive_failures INTEGER DEFAULT 0,
+            last_failure_at REAL,
+            last_failure_reason TEXT DEFAULT '',
+            last_success_at REAL,
+            last_action_at REAL,
+            next_allowed_at TEXT DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at REAL,
+            FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
+        )
+        ''')
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_account_risk_states_paused ON account_risk_states(paused, updated_at)")
 
     def _ensure_scheduled_task_logs_table(self, cursor):
         """创建通用任务执行日志表。"""
@@ -2408,8 +2477,8 @@ Cookie数量: {cookie_count}
                 logger.error(f"获取账号自动回复暂停时间失败: {e}")
                 return 10
 
-    def update_cookie_account_info(self, cookie_id: str, cookie_value: str = None, username: str = None, password: str = None, show_browser: bool = None, user_id: int = None) -> bool:
-        """更新Cookie的账号信息（包括cookie值、用户名、密码和显示浏览器设置）
+    def update_cookie_account_info(self, cookie_id: str, cookie_value: str = None, username: str = None, password: str = None, show_browser: bool = None, user_id: int = None, remark: str = None) -> bool:
+        """更新Cookie的账号信息（包括cookie值、用户名、密码、备注和显示浏览器设置）
         如果记录不存在，会先创建记录（需要提供cookie_value和user_id）
         """
         with self.lock:
@@ -2452,6 +2521,11 @@ Cookie数量: {cookie_count}
                         insert_fields.append('show_browser')
                         insert_values.append(1 if show_browser else 0)
                         insert_placeholders.append('?')
+
+                    if remark is not None:
+                        insert_fields.append('remark')
+                        insert_values.append(remark)
+                        insert_placeholders.append('?')
                     
                     sql = f"INSERT INTO cookies ({', '.join(insert_fields)}) VALUES ({', '.join(insert_placeholders)})"
                     self._execute_sql(cursor, sql, tuple(insert_values))
@@ -2479,6 +2553,10 @@ Cookie数量: {cookie_count}
                     if show_browser is not None:
                         update_fields.append("show_browser = ?")
                         params.append(1 if show_browser else 0)
+
+                    if remark is not None:
+                        update_fields.append("remark = ?")
+                        params.append(remark)
                     
                     if not update_fields:
                         logger.warning(f"更新账号 {cookie_id} 信息时没有提供任何更新字段")
@@ -9258,6 +9336,87 @@ Cookie数量: {cookie_count}
             logger.error(f"获取风控日志数量失败: {e}")
             return 0
 
+    def get_account_risk_state(self, cookie_id: str) -> Optional[Dict[str, Any]]:
+        """Return persisted risk pause/cooldown state for one account."""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT * FROM account_risk_states WHERE cookie_id = ?", (cookie_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                columns = [description[0] for description in cursor.description]
+                data = dict(zip(columns, row))
+                try:
+                    data['next_allowed_at'] = json.loads(data.get('next_allowed_at') or '{}')
+                except Exception:
+                    data['next_allowed_at'] = {}
+                return data
+        except Exception as e:
+            logger.error(f"获取账号风控状态失败: {e}")
+            return None
+
+    def upsert_account_risk_state(self, cookie_id: str, **updates) -> bool:
+        """Create or update persisted risk pause/cooldown state."""
+        if not cookie_id:
+            return False
+        allowed_fields = {
+            'paused', 'pause_reason', 'paused_at', 'consecutive_failures',
+            'last_failure_at', 'last_failure_reason', 'last_success_at',
+            'last_action_at', 'next_allowed_at', 'updated_at',
+        }
+        clean_updates = {key: value for key, value in updates.items() if key in allowed_fields}
+        if 'next_allowed_at' in clean_updates and not isinstance(clean_updates['next_allowed_at'], str):
+            clean_updates['next_allowed_at'] = json.dumps(clean_updates['next_allowed_at'] or {}, ensure_ascii=False)
+        clean_updates.setdefault('updated_at', time.time())
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "INSERT OR IGNORE INTO account_risk_states (cookie_id, updated_at) VALUES (?, ?)",
+                    (cookie_id, clean_updates.get('updated_at')),
+                )
+                if clean_updates:
+                    assignments = ', '.join([f"{field} = ?" for field in clean_updates.keys()])
+                    params = list(clean_updates.values()) + [cookie_id]
+                    cursor.execute(f"UPDATE account_risk_states SET {assignments} WHERE cookie_id = ?", params)
+                self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"更新账号风控状态失败: {e}")
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            return False
+
+    def get_account_risk_states(self, cookie_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Return risk states, optionally scoped to account ids."""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                query = "SELECT * FROM account_risk_states"
+                params = []
+                if cookie_ids:
+                    placeholders = ','.join(['?'] * len(cookie_ids))
+                    query += f" WHERE cookie_id IN ({placeholders})"
+                    params.extend(cookie_ids)
+                query += " ORDER BY paused DESC, updated_at DESC"
+                cursor.execute(query, params)
+                columns = [description[0] for description in cursor.description]
+                rows = []
+                for row in cursor.fetchall():
+                    data = dict(zip(columns, row))
+                    try:
+                        data['next_allowed_at'] = json.loads(data.get('next_allowed_at') or '{}')
+                    except Exception:
+                        data['next_allowed_at'] = {}
+                    rows.append(data)
+                return rows
+        except Exception as e:
+            logger.error(f"获取账号风控状态列表失败: {e}")
+            return []
+
     def get_slider_verification_session_stats(self, cookie_ids: Optional[List[str]] = None, range_key: str = 'all') -> Dict[str, Any]:
         """获取滑块验证会话级统计数据。"""
         empty_stats = {
@@ -9606,6 +9765,170 @@ Cookie数量: {cookie_count}
         except Exception as e:
             logger.error(f"清理历史数据时出错: {e}")
             return {'error': str(e)}
+
+    # ==================== 商品发布任务管理 ====================
+
+    def create_item_publish_task(
+        self,
+        user_id: int,
+        account_id: str,
+        title: str,
+        description: str = '',
+        price: str = '',
+        category_keyword: str = '',
+        images_json: str = '[]',
+        status: str = 'draft',
+        publish_url: str = ''
+    ) -> Optional[int]:
+        """创建商品发布任务。"""
+        with self.lock:
+            try:
+                normalized_title = str(title or '').strip()
+                if not normalized_title:
+                    raise ValueError('title不能为空')
+
+                normalized_images = images_json if isinstance(images_json, str) else json.dumps(images_json, ensure_ascii=False)
+                try:
+                    parsed_images = json.loads(normalized_images or '[]')
+                    if not isinstance(parsed_images, list):
+                        parsed_images = []
+                except Exception:
+                    parsed_images = []
+                    normalized_images = '[]'
+
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, """
+                    INSERT INTO item_publish_tasks (
+                        user_id, account_id, title, description, price, category_keyword,
+                        status, publish_url, images_json, image_count, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    user_id,
+                    account_id,
+                    normalized_title,
+                    str(description or '').strip(),
+                    str(price or '').strip(),
+                    str(category_keyword or '').strip(),
+                    status or 'draft',
+                    str(publish_url or '').strip(),
+                    normalized_images,
+                    len(parsed_images),
+                    now,
+                    now
+                ))
+                self.conn.commit()
+                task_id = cursor.lastrowid
+                logger.info(f"创建商品发布任务成功: task_id={task_id}, account_id={account_id}")
+                return task_id
+            except Exception as e:
+                logger.error(f"创建商品发布任务失败: {e}")
+                self.conn.rollback()
+                return None
+
+    def _parse_item_publish_task_row(self, cursor, row) -> Dict[str, Any]:
+        columns = [description[0] for description in cursor.description]
+        task = dict(zip(columns, row))
+        for key in ('images_json', 'matched_item_ids'):
+            parsed_key = f'{key}_parsed'
+            try:
+                parsed = json.loads(task.get(key) or '[]')
+                task[parsed_key] = parsed if isinstance(parsed, list) else []
+            except Exception:
+                task[parsed_key] = []
+        task['image_count'] = int(task.get('image_count') or 0)
+        return task
+
+    def get_item_publish_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        """获取单个商品发布任务。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, "SELECT * FROM item_publish_tasks WHERE id = ?", (task_id,))
+                row = cursor.fetchone()
+                return self._parse_item_publish_task_row(cursor, row) if row else None
+            except Exception as e:
+                logger.error(f"获取商品发布任务失败: {e}")
+                return None
+
+    def get_item_publish_tasks(
+        self,
+        user_id: Optional[int] = None,
+        account_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """获取商品发布任务列表。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                sql = "SELECT * FROM item_publish_tasks WHERE 1=1"
+                params: List[Any] = []
+                if user_id is not None:
+                    sql += " AND user_id = ?"
+                    params.append(user_id)
+                if account_id:
+                    sql += " AND account_id = ?"
+                    params.append(account_id)
+                if status:
+                    sql += " AND status = ?"
+                    params.append(status)
+                sql += " ORDER BY id DESC LIMIT ?"
+                params.append(max(1, min(int(limit or 100), 500)))
+                self._execute_sql(cursor, sql, tuple(params))
+                return [self._parse_item_publish_task_row(cursor, row) for row in cursor.fetchall()]
+            except Exception as e:
+                logger.error(f"获取商品发布任务列表失败: {e}")
+                return []
+
+    def update_item_publish_task(self, task_id: int, **kwargs) -> bool:
+        """更新商品发布任务。"""
+        allowed_fields = {
+            'user_id', 'account_id', 'title', 'description', 'price',
+            'category_keyword', 'status', 'publish_url', 'images_json',
+            'image_count', 'platform_item_id', 'matched_item_ids',
+            'browser_screenshot', 'error_message', 'error_details',
+            'notes', 'started_at', 'confirmed_at', 'finished_at'
+        }
+        with self.lock:
+            try:
+                update_fields = []
+                params: List[Any] = []
+                for key, value in kwargs.items():
+                    if key not in allowed_fields:
+                        continue
+                    if key in ('images_json', 'matched_item_ids') and value is not None and not isinstance(value, str):
+                        value = json.dumps(value, ensure_ascii=False)
+                    update_fields.append(f"{key} = ?")
+                    params.append(value)
+
+                if not update_fields:
+                    return False
+
+                update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                params.append(task_id)
+                cursor = self.conn.cursor()
+                sql = f"UPDATE item_publish_tasks SET {', '.join(update_fields)} WHERE id = ?"
+                self._execute_sql(cursor, sql, tuple(params))
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"更新商品发布任务失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def delete_item_publish_task(self, task_id: int) -> bool:
+        """删除商品发布任务。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, "DELETE FROM item_publish_tasks WHERE id = ?", (task_id,))
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"删除商品发布任务失败: {e}")
+                self.conn.rollback()
+                return False
 
     # ==================== 定时任务管理 ====================
 

@@ -3,6 +3,7 @@
 # 使用方法: docker build --build-arg BASE_IMAGE=ccr.ccs.tencentyun.com/dockerp/library/python:3.11-slim-bookworm
 ARG BASE_IMAGE=docker.1panel.live/library/python:3.11-slim-bookworm
 FROM ${BASE_IMAGE}
+ARG APT_MIRROR=deb.debian.org
 
 # 设置标签信息
 LABEL maintainer="GuDong2003"
@@ -25,7 +26,9 @@ ENV DOCKER_ENV=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 #更换中科大源
-RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources
+RUN if [ "${APT_MIRROR}" != "deb.debian.org" ]; then \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi
 
 # 安装系统依赖（包括Playwright浏览器依赖）
 RUN apt-get update && \

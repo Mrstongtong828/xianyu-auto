@@ -685,9 +685,13 @@
                   <label for="cookieId" class="form-label">账号ID</label>
                   <input type="text" class="form-control" id="cookieId" placeholder="唯一标识" required>
                 </div>
-                <div class="col-md-9">
+                <div class="col-md-5">
                   <label for="cookieValue" class="form-label">Cookie值</label>
                   <input type="text" class="form-control" id="cookieValue" placeholder="完整Cookie字符串" required>
+                </div>
+                <div class="col-md-4">
+                  <label for="cookieRemark" class="form-label">备注</label>
+                  <input type="text" class="form-control" id="cookieRemark" maxlength="100" placeholder="例如：主号、售后号">
                 </div>
                 <div class="col-12">
                   <div class="form-check">
@@ -1277,7 +1281,8 @@
       </div>
     </div>
 
-     <!-- 指定商品自动管理内容 -->
+    <!-- 发布商品内容 -->
+    <!-- 指定商品自动管理内容 -->
     <div id="items-reply-section" class="content-section">
       <div class="content-header">
         <h2 class="mb-0">
@@ -4926,7 +4931,7 @@
 
   <!-- JS依赖 -->
   <script src="/static/lib/bootstrap/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/app.js?v=1.2.9"></script>
+  <script src="/static/js/app.js?v=1.2.12"></script>
 
   <!-- 默认回复管理模态框 -->
   <div class="modal fade" id="defaultReplyModal" tabindex="-1" aria-labelledby="defaultReplyModalLabel" aria-hidden="true">
@@ -5561,6 +5566,12 @@
               <label class="form-label">用户名</label>
               <input type="text" class="form-control" id="editAccountUsername" placeholder="输入用户名（可选）">
               <div class="form-text">用于账密登录、自动刷新 Cookie 和自动恢复</div>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label">账号备注</label>
+              <input type="text" class="form-control" id="editAccountRemark" maxlength="100" placeholder="例如：主号、售后号、数码店 A">
+              <div class="form-text">仅用于后台区分账号，不会发送给买家</div>
             </div>
             
             <div class="mb-3">

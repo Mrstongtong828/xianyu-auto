@@ -5,8 +5,10 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Tuple, Optional, Dict, Any, Callable, Awaitable
 from pathlib import Path
-from urllib.parse import unquote
+from pathlib import PurePosixPath
+from urllib.parse import unquote, urlparse
 from urllib import request as urllib_request, error as urllib_error
+from decimal import Decimal
 import hashlib
 import secrets
 import time
@@ -27,6 +29,7 @@ from collections import defaultdict
 import cookie_manager
 from db_manager import db_manager
 from config import RISK_CONTROL
+from risk_governor import create_risk_governor
 from file_log_collector import setup_file_logging, get_file_log_collector
 from ai_reply_engine import ai_reply_engine
 from utils.qr_login import qr_login_manager
@@ -53,6 +56,8 @@ from chat_event_hub import chat_event_hub, publish_chat_message
 from order_event_hub import order_event_hub, publish_order_update_event
 
 from loguru import logger
+
+risk_governor = create_risk_governor(db_manager)
 
 # 刮刮乐远程控制路由
 try:
@@ -2438,6 +2443,7 @@ async def xianyu_reply(req: RequestModel):
 class CookieIn(BaseModel):
     id: str
     value: str
+    remark: Optional[str] = None
 
 
 class ManualCookieImportRequest(BaseModel):
@@ -3637,6 +3643,8 @@ def add_cookie(item: CookieIn, current_user: Dict[str, Any] = Depends(get_curren
 
         # 保存到数据库时指定用户ID
         db_manager.save_cookie(item.id, item.value, user_id)
+        if item.remark is not None:
+            db_manager.update_cookie_remark(item.id, item.remark.strip())
 
         # 添加到CookieManager，同时指定用户ID
         cookie_manager.manager.add_cookie(item.id, item.value, user_id=user_id)
@@ -3692,6 +3700,7 @@ class CookieAccountInfo(BaseModel):
     value: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    remark: Optional[str] = None
     show_browser: Optional[bool] = None
 
 
@@ -3719,6 +3728,7 @@ def update_cookie_account_info(cid: str, info: CookieAccountInfo, current_user: 
             cookie_value=info.value,
             username=info.username,
             password=info.password,
+            remark=info.remark,
             show_browser=info.show_browser
         )
         
@@ -9130,6 +9140,527 @@ def reload_cache(current_user: Dict[str, Any] = Depends(get_current_user)):
 
 # ==================== 商品管理 API ====================
 
+PUBLISH_TASK_STATUSES = {
+    'draft',
+    'running',
+    'waiting_manual_confirm',
+    'published',
+    'failed',
+    'cancelled'
+}
+PUBLISH_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+
+
+class ItemPublishTaskCreateRequest(BaseModel):
+    account_id: str
+    title: str
+    description: str = ''
+    price: str
+    category_keyword: str = ''
+    images: List[str]
+
+
+class ItemPublishTaskListResponse(BaseModel):
+    success: bool
+    tasks: List[Dict[str, Any]]
+
+
+def _parse_publish_notes(notes: str) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(notes or '{}')
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _json_dumps_cn(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _normalize_publish_image_url(image_url: str) -> str:
+    raw_url = str(image_url or '').strip()
+    if not raw_url or '\\' in raw_url:
+        raise HTTPException(status_code=400, detail=f"图片地址不受支持: {image_url}")
+
+    parsed_path = unquote(urlparse(raw_url).path)
+    static_prefix = '/static/uploads/images/'
+    relative_prefix = 'static/uploads/images/'
+    if parsed_path.startswith(static_prefix):
+        relative_path = parsed_path[len(static_prefix):]
+    elif parsed_path.startswith(relative_prefix):
+        relative_path = parsed_path[len(relative_prefix):]
+    else:
+        raise HTTPException(status_code=400, detail=f"图片地址不受支持: {image_url}")
+
+    parts = relative_path.split('/')
+    if (
+        not relative_path
+        or any(part in {'', '.', '..'} for part in parts)
+        or PurePosixPath(relative_path).is_absolute()
+    ):
+        raise HTTPException(status_code=400, detail=f"图片地址不受支持: {image_url}")
+
+    image_suffix = PurePosixPath(relative_path).suffix.lower()
+    if image_suffix not in PUBLISH_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"图片类型不受支持: {image_suffix or '未知'}")
+
+    return f"{static_prefix}{relative_path}"
+
+
+def _serialize_publish_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(task)
+    data['images'] = data.pop('images_json_parsed', [])
+    data['matched_item_ids'] = data.pop('matched_item_ids_parsed', [])
+    data['notes_parsed'] = _parse_publish_notes(data.get('notes', ''))
+    try:
+        from utils.item_publisher import get_active_publisher
+
+        data['active_browser_available'] = bool(get_active_publisher(int(data.get('id') or 0)))
+    except Exception:
+        data['active_browser_available'] = False
+    return data
+
+
+def _validate_publish_task_payload(request_data: ItemPublishTaskCreateRequest) -> Dict[str, Any]:
+    account_id = str(request_data.account_id or '').strip()
+    title = str(request_data.title or '').strip()
+    description = str(request_data.description or '').strip()
+    price = str(request_data.price or '').strip()
+    category_keyword = str(request_data.category_keyword or '').strip()
+
+    if not account_id:
+        raise HTTPException(status_code=400, detail="请选择发布账号")
+    if not title:
+        raise HTTPException(status_code=400, detail="请输入商品标题")
+    if len(title) > 80:
+        raise HTTPException(status_code=400, detail="商品标题最多80个字符")
+    if not price:
+        raise HTTPException(status_code=400, detail="请输入商品价格")
+    if not re.fullmatch(r'\d+(?:\.\d{1,2})?', price):
+        raise HTTPException(status_code=400, detail="商品价格格式不正确，最多支持2位小数")
+    if float(price) <= 0:
+        raise HTTPException(status_code=400, detail="商品价格必须大于0")
+
+    image_urls = [str(url or '').strip() for url in (request_data.images or []) if str(url or '').strip()]
+    if len(image_urls) < 1 or len(image_urls) > 9:
+        raise HTTPException(status_code=400, detail="请上传1-9张商品图片")
+
+    normalized_images = []
+    for image_url in image_urls:
+        normalized_images.append({'image_url': _normalize_publish_image_url(image_url)})
+
+    return {
+        'account_id': account_id,
+        'title': title,
+        'description': description,
+        'price': price,
+        'category_keyword': category_keyword,
+        'images': normalized_images,
+    }
+
+
+def _get_owned_publish_task(task_id: int, current_user: Dict[str, Any]) -> Dict[str, Any]:
+    task = db_manager.get_item_publish_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="发布任务不存在")
+    if int(task.get('user_id') or 0) != int(current_user['user_id']):
+        raise HTTPException(status_code=403, detail="无权限访问该发布任务")
+    return task
+
+
+def _merge_publish_task_notes(task: Dict[str, Any], updates: Dict[str, Any]) -> str:
+    notes = _parse_publish_notes(task.get('notes', ''))
+    notes.update(updates)
+    return _json_dumps_cn(notes)
+
+
+def _normalize_match_text(value: Any) -> str:
+    return re.sub(r'\s+', '', str(value or '')).lower()
+
+
+def _normalize_match_price(value: Any) -> str:
+    price_text = str(value or '').strip()
+    if not price_text:
+        return ''
+    normalized = re.sub(r'[^\d.]', '', price_text)
+    if normalized.count('.') > 1:
+        first, *rest = normalized.split('.')
+        normalized = first + '.' + ''.join(rest)
+    if not normalized:
+        return ''
+    try:
+        amount = Decimal(normalized)
+    except Exception:
+        return price_text
+    return f"{amount:.2f}"
+
+
+def _match_published_items(task: Dict[str, Any], items: List[Dict[str, Any]]) -> List[str]:
+    notes = _parse_publish_notes(task.get('notes', ''))
+    before_ids = {str(item_id) for item_id in notes.get('before_item_ids', [])}
+    title = _normalize_match_text(task.get('title', ''))
+    price = _normalize_match_price(task.get('price'))
+    matches = []
+
+    for item in items or []:
+        item_id = str(item.get('id') or item.get('item_id') or '').strip()
+        if not item_id or item_id in before_ids:
+            continue
+        item_title = _normalize_match_text(item.get('title') or item.get('item_title') or '')
+        item_price = _normalize_match_price(item.get('price') or item.get('item_price'))
+        title_match = title and (title == item_title or title in item_title or item_title in title)
+        price_match = not price or not item_price or item_price == price
+        if title_match and price_match:
+            matches.append(item_id)
+
+    return matches
+
+
+def _persist_matched_published_item(account_id: str, matched_item_id: str, items: List[Dict[str, Any]]) -> bool:
+    matched_item = None
+    for item in items or []:
+        item_id = str(item.get('id') or item.get('item_id') or '').strip()
+        if item_id == str(matched_item_id):
+            matched_item = item
+            break
+
+    if not matched_item:
+        return False
+
+    item_title = matched_item.get('title') or matched_item.get('item_title') or ''
+    item_description = matched_item.get('description') or matched_item.get('item_description') or ''
+    item_category = matched_item.get('category') or matched_item.get('item_category') or ''
+    item_price = matched_item.get('price') or matched_item.get('item_price') or ''
+    item_detail = matched_item.get('item_detail') or _json_dumps_cn(matched_item)
+
+    return db_manager.save_item_basic_info(
+        str(account_id),
+        str(matched_item_id),
+        item_title=str(item_title or ''),
+        item_description=str(item_description or ''),
+        item_category=str(item_category or ''),
+        item_price=str(item_price or ''),
+        item_detail=str(item_detail or ''),
+    )
+
+
+def _merge_publish_item_candidates(*item_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge API-returned items and DB items so result detection is resilient."""
+    merged = []
+    seen_ids = set()
+
+    for group in item_groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get('id') or item.get('item_id') or '').strip()
+            if not item_id or item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            merged.append(item)
+
+    return merged
+
+
+@app.get("/item-publish/tasks")
+def list_item_publish_tasks(
+    account_id: Optional[str] = None,
+    status: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """获取当前用户的商品发布任务列表"""
+    if status and status not in PUBLISH_TASK_STATUSES:
+        raise HTTPException(status_code=400, detail="无效的发布任务状态")
+    tasks = db_manager.get_item_publish_tasks(
+        user_id=current_user['user_id'],
+        account_id=account_id,
+        status=status,
+        limit=100
+    )
+    return {"success": True, "tasks": [_serialize_publish_task(task) for task in tasks]}
+
+
+@app.post("/item-publish/tasks")
+def create_item_publish_task(
+    request_data: ItemPublishTaskCreateRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """创建授权账号单品发布任务"""
+    payload = _validate_publish_task_payload(request_data)
+    user_cookies = db_manager.get_all_cookies(current_user['user_id'])
+    if payload['account_id'] not in user_cookies:
+        raise HTTPException(status_code=403, detail="无权限使用该账号发布商品")
+
+    task_id = db_manager.create_item_publish_task(
+        user_id=current_user['user_id'],
+        account_id=payload['account_id'],
+        title=payload['title'],
+        description=payload['description'],
+        price=payload['price'],
+        category_keyword=payload['category_keyword'],
+        images_json=_json_dumps_cn(payload['images']),
+        status='draft',
+    )
+    if not task_id:
+        raise HTTPException(status_code=500, detail="创建发布任务失败")
+
+    task = db_manager.get_item_publish_task(task_id)
+    log_with_user('info', f"创建商品发布任务: task_id={task_id}, account_id={payload['account_id']}", current_user)
+    return {"success": True, "task": _serialize_publish_task(task)}
+
+
+@app.get("/item-publish/tasks/{task_id}")
+def get_item_publish_task(task_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取单个商品发布任务"""
+    task = _get_owned_publish_task(task_id, current_user)
+    return {"success": True, "task": _serialize_publish_task(task)}
+
+
+@app.post("/item-publish/tasks/{task_id}/start")
+async def start_item_publish_task(task_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """启动发布浏览器并自动填写商品信息，最终停在人工确认前。"""
+    task = _get_owned_publish_task(task_id, current_user)
+    if task['status'] in {'published', 'cancelled'}:
+        raise HTTPException(status_code=400, detail="该发布任务已结束，不能再次启动")
+    previous_status = task['status']
+
+    cookie_info = db_manager.get_cookie_by_id(task['account_id'])
+    decision = risk_governor.check(task['account_id'], "product_publish")
+    if not decision.allowed:
+        db_manager.update_item_publish_task(
+            task_id,
+            status='failed',
+            error_message=f"风控保护暂停发布：{decision.reason or decision.status}",
+            error_details='账号处于风控暂停或冷却中，请手动恢复后再发布',
+            finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        )
+        task = db_manager.get_item_publish_task(task_id)
+        return {"success": False, "task": _serialize_publish_task(task)}
+    if not cookie_info or not cookie_info.get('cookies_str'):
+        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        db_manager.update_item_publish_task(
+            task_id,
+            status='failed',
+            error_message='发布账号Cookie为空或不存在',
+            error_details='请先为该授权账号刷新或重新保存 Cookie 后再启动发布任务',
+            finished_at=finished_at
+        )
+        task = db_manager.get_item_publish_task(task_id)
+        return {"success": False, "task": _serialize_publish_task(task)}
+
+    before_items = db_manager.get_items_by_cookie(task['account_id'])
+    before_item_ids = [str(item.get('item_id') or '') for item in before_items if item.get('item_id')]
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db_manager.update_item_publish_task(
+        task_id,
+        status='running',
+        started_at=now,
+        error_message='',
+        error_details='',
+        notes=_merge_publish_task_notes(task, {
+            'before_item_ids': before_item_ids,
+            'started_by': current_user['user_id'],
+            'started_at': now
+        })
+    )
+    task = db_manager.get_item_publish_task(task_id)
+
+    from utils.item_publisher import (
+        XianyuItemPublisher,
+        close_active_publisher,
+        get_active_publisher,
+        register_active_publisher,
+    )
+
+    active_publisher = get_active_publisher(task_id)
+    should_continue_active_browser = previous_status == 'waiting_manual_confirm' and active_publisher is not None
+    if should_continue_active_browser:
+        publisher = active_publisher
+    else:
+        await close_active_publisher(task_id)
+        publisher = XianyuItemPublisher(task, cookie_info['cookies_str'])
+        register_active_publisher(task_id, publisher)
+
+    try:
+        await risk_governor.wait_before_action(task['account_id'], "product_publish")
+        if should_continue_active_browser:
+            result = await publisher.continue_after_manual_auth()
+        else:
+            result = await publisher.start()
+        status_value = result.get('status') or ('waiting_manual_confirm' if result.get('success') else 'failed')
+        updates = {
+            'status': status_value,
+            'browser_screenshot': result.get('browser_screenshot', ''),
+            'error_message': result.get('error_message', ''),
+            'error_details': result.get('error_details', ''),
+            'notes': _merge_publish_task_notes(task, {
+                'publisher_result_notes': _parse_publish_notes(result.get('notes', '')),
+                'publisher_finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'continued_active_browser': should_continue_active_browser
+            })
+        }
+        if status_value in {'failed', 'cancelled'}:
+            updates['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            await close_active_publisher(task_id)
+            risk_governor.record_failure(task['account_id'], "product_publish", updates.get('error_message') or status_value)
+        else:
+            risk_governor.record_success(task['account_id'], "product_publish")
+
+        db_manager.update_item_publish_task(task_id, **updates)
+        task = db_manager.get_item_publish_task(task_id)
+        return {"success": result.get('success', False), "task": _serialize_publish_task(task)}
+    except Exception as e:
+        logger.error(f"启动商品发布任务异常: task_id={task_id}, error={e}")
+        risk_governor.record_failure(task['account_id'], "product_publish", e)
+        screenshot = ''
+        try:
+            screenshot = await publisher.save_screenshot('exception')
+        except Exception:
+            pass
+        await close_active_publisher(task_id)
+        db_manager.update_item_publish_task(
+            task_id,
+            status='failed',
+            browser_screenshot=screenshot,
+            error_message=f"启动发布浏览器失败: {str(e)}",
+            finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        )
+        task = db_manager.get_item_publish_task(task_id)
+        return {"success": False, "task": _serialize_publish_task(task)}
+
+
+@app.post("/item-publish/tasks/{task_id}/cancel")
+async def cancel_item_publish_task(task_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """取消发布任务并关闭仍在等待的发布浏览器。"""
+    task = _get_owned_publish_task(task_id, current_user)
+    if task['status'] == 'published':
+        raise HTTPException(status_code=400, detail="已发布任务不能取消")
+
+    from utils.item_publisher import close_active_publisher
+    await close_active_publisher(task_id)
+    db_manager.update_item_publish_task(
+        task_id,
+        status='cancelled',
+        finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        error_message='用户取消发布任务'
+    )
+    task = db_manager.get_item_publish_task(task_id)
+    return {"success": True, "task": _serialize_publish_task(task)}
+
+
+@app.post("/item-publish/tasks/{task_id}/confirm")
+async def confirm_item_publish_task(task_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """人工在平台完成发布后，同步商品并尝试识别新商品ID。"""
+    task = _get_owned_publish_task(task_id, current_user)
+    if task['status'] not in {'running', 'waiting_manual_confirm'}:
+        raise HTTPException(status_code=400, detail="只有等待人工确认的任务可以检测发布结果")
+
+    cookie_info = db_manager.get_cookie_by_id(task['account_id'])
+    if not cookie_info or not cookie_info.get('cookies_str'):
+        raise HTTPException(status_code=400, detail="发布账号Cookie为空或不存在")
+
+    from utils.item_publisher import get_active_publisher
+    active_publisher = get_active_publisher(task_id)
+    browser_cookie_string = ''
+    if active_publisher:
+        browser_cookie_string = await active_publisher.export_cookie_string()
+        if browser_cookie_string and len(browser_cookie_string) > 50:
+            try:
+                db_manager.update_cookie_account_info(task['account_id'], cookie_value=browser_cookie_string)
+                if cookie_manager.manager:
+                    cookie_manager.manager.update_cookie(task['account_id'], browser_cookie_string, save_to_db=False)
+                cookie_info['cookies_str'] = browser_cookie_string
+                cookie_info['value'] = browser_cookie_string
+                logger.info(f"已从发布浏览器同步账号Cookie: task_id={task_id}, account_id={task['account_id']}")
+            except Exception as cookie_e:
+                logger.warning(f"同步发布浏览器Cookie失败: task_id={task_id}, error={cookie_e}")
+
+    xianyu_instance = None
+    try:
+        from XianyuAutoAsync import XianyuLive
+        xianyu_instance = XianyuLive(cookie_info['cookies_str'], task['account_id'], register_instance=False)
+        sync_result = await xianyu_instance.get_all_items(sync_item_details=True)
+    except Exception as e:
+        logger.error(f"检测发布结果同步商品失败: task_id={task_id}, error={e}")
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        notes = _merge_publish_task_notes(task, {
+            'last_confirm_sync': {
+                'success': False,
+                'error': str(e),
+            },
+            'browser_cookie_synced': bool(browser_cookie_string),
+            'confirmed_by': current_user['user_id'],
+            'confirmed_at': now
+        })
+        db_manager.update_item_publish_task(
+            task_id,
+            status='waiting_manual_confirm',
+            confirmed_at=now,
+            error_message=f"同步账号商品失败: {str(e)}",
+            error_details='请确认账号 Cookie 有效后重试检测，或取消该发布任务',
+            notes=notes
+        )
+        task = db_manager.get_item_publish_task(task_id)
+        return {"success": False, "task": _serialize_publish_task(task)}
+    finally:
+        if xianyu_instance:
+            try:
+                await xianyu_instance.close_session()
+            except Exception as close_e:
+                logger.warning(f"关闭发布结果检测会话失败: task_id={task_id}, error={close_e}")
+
+    returned_items = sync_result.get('items', []) if isinstance(sync_result, dict) else []
+    db_items_after_sync = db_manager.get_items_by_cookie(task['account_id'])
+    synced_items = _merge_publish_item_candidates(returned_items, db_items_after_sync)
+    matches = _match_published_items(task, synced_items)
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    notes = _merge_publish_task_notes(task, {
+        'last_confirm_sync': {
+            'success': bool(sync_result.get('success')) if isinstance(sync_result, dict) else False,
+            'total_count': sync_result.get('total_count') if isinstance(sync_result, dict) else None,
+            'total_pages': sync_result.get('total_pages') if isinstance(sync_result, dict) else None,
+            'returned_item_count': len(returned_items),
+            'db_item_count_after_sync': len(db_items_after_sync),
+            'candidate_item_count': len(synced_items),
+        },
+        'browser_cookie_synced': bool(browser_cookie_string),
+        'confirmed_by': current_user['user_id'],
+        'confirmed_at': now
+    })
+
+    if matches:
+        from utils.item_publisher import close_active_publisher
+        await close_active_publisher(task_id)
+        item_info_persisted = _persist_matched_published_item(task['account_id'], matches[0], synced_items)
+        notes = _merge_publish_task_notes({**task, 'notes': notes}, {
+            'matched_item_info_persisted': item_info_persisted
+        })
+        db_manager.update_item_publish_task(
+            task_id,
+            status='published',
+            platform_item_id=matches[0],
+            matched_item_ids=matches,
+            confirmed_at=now,
+            finished_at=now,
+            error_message='',
+            error_details='',
+            notes=notes
+        )
+        task = db_manager.get_item_publish_task(task_id)
+        return {"success": True, "task": _serialize_publish_task(task)}
+
+    db_manager.update_item_publish_task(
+        task_id,
+        status='waiting_manual_confirm',
+        matched_item_ids=[],
+        confirmed_at=now,
+        error_message='已同步商品列表，但没有匹配到新发布商品ID，请确认平台发布是否成功',
+        notes=notes
+    )
+    task = db_manager.get_item_publish_task(task_id)
+    return {"success": False, "task": _serialize_publish_task(task)}
+
+
 @app.get("/items")
 def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户的所有商品信息"""
@@ -10505,6 +11036,47 @@ async def get_risk_control_logs(
             "data": [],
             "total": 0
         }
+
+@app.get("/accounts/{cid}/risk-state")
+def get_account_risk_state(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Get account risk pause/cooldown state."""
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        state = db_manager.get_account_risk_state(cid) or {
+            "cookie_id": cid,
+            "paused": 0,
+            "pause_reason": "",
+            "consecutive_failures": 0,
+            "next_allowed_at": {},
+        }
+        decision = risk_governor.check(cid, "manual_status")
+        return {
+            "success": True,
+            "state": state,
+            "status": decision.status,
+            "allowed": decision.allowed,
+            "message": decision.reason,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取账号风控状态失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="获取账号风控状态失败")
+
+
+@app.post("/accounts/{cid}/risk-state/resume")
+def resume_account_risk_state(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Manually resume account automation after risk pause."""
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        ok = risk_governor.resume_account(cid, current_user.get("username") or current_user.get("user_id") or "manual")
+        db_manager.update_cookie_status_note(cid, "")
+        return {"success": bool(ok), "message": "账号风控暂停已解除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"恢复账号风控状态失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="恢复账号风控状态失败")
 
 
 @app.get("/admin/slider-verification-stats")
@@ -12793,7 +13365,7 @@ async def run_auto_comment_once(
                     stats['skipped'] += 1
                 else:
                     stats['failed'] += 1
-                await asyncio.sleep(1)
+                await asyncio.sleep(risk_governor.jitter_delay("auto_red_flower"))
 
         return {"success": True, "data": {"stats": stats, "results": results}}
     except HTTPException:
@@ -13097,11 +13669,13 @@ def get_chat_accounts(current_user: Dict[str, Any] = Depends(get_current_user)):
             status = _build_live_runtime_status(cid)
             detail = db_manager.get_cookie_details(cid) or {}
             display_name = detail.get('remark') or detail.get('username') or cid
+            risk_state = db_manager.get_account_risk_state(cid) or {}
             accounts.append({
                 'id': cid,
                 'name': display_name,
                 'enabled': db_manager.get_cookie_status(cid),
                 'connected': status.get('connection_state') == 'connected' if status else False,
+                'risk_state': risk_state,
             })
         return {'success': True, 'accounts': accounts}
     except Exception as e:
@@ -14482,6 +15056,10 @@ async def scheduled_task_checker():
                     account_id = task['account_id']
                     task_id = task['id']
                     task_type = task['task_type']
+                    decision = risk_governor.check(account_id, task_type)
+                    if not decision.allowed:
+                        logger.warning(f"定时任务 {task_id} 因风控保护跳过: account={account_id}, status={decision.status}, reason={decision.reason}")
+                        continue
 
                     logger.info(f"执行定时任务: {task['name']} (ID: {task_id}, 账号: {account_id})")
 

@@ -63,9 +63,25 @@ MANUAL_MODE:
   toggle_keywords: []
 MESSAGE_EXPIRE_TIME: 300000
 RISK_CONTROL:
+  safe_mode_enabled: true
   backoff_escalation_factor: 1.5
   backoff_max_cap_seconds: 3600
   consecutive_failure_protection_threshold: 5
+  max_consecutive_risk_failures: 2
+  auto_pause_on_session_expired: true
+  auto_pause_on_verify_required: true
+  global_account_min_interval_seconds: 12
+  task_cooldown_seconds: 180
+  high_risk_cooldown_seconds: 1800
+  auto_rate_batch_limit: 1
+  auto_red_flower_batch_limit: 1
+  auto_task_interval_seconds: 900
+  auto_order_action_delay_min_seconds: 15
+  auto_order_action_delay_max_seconds: 45
+  item_polish_delay_min_seconds: 20
+  item_polish_delay_max_seconds: 60
+  publish_action_delay_min_seconds: 30
+  publish_action_delay_max_seconds: 90
   max_post_slider_session_retries: 1
   soft_auth_token_preflight_enabled: true
   soft_auth_token_preflight_timeout_seconds: 5.0
@@ -73,7 +89,7 @@ RISK_CONTROL:
   night_cookie_refresh_multiplier: 2
   night_end_hour: 6
   night_keepalive_multiplier: 3
-  night_mode_enabled: false
+  night_mode_enabled: true
   night_start_hour: 1
   qr_login_grace_minutes: 15
   post_slider_retry_delay_max: 10.0

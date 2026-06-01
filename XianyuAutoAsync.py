@@ -30,6 +30,7 @@ import aiohttp
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple
 from db_manager import db_manager
+from risk_governor import create_risk_governor
 from utils.notification_dispatcher import (
     build_face_verify_notification,
     dispatch_account_notifications,
@@ -38,6 +39,8 @@ from utils.notification_dispatcher import (
     guess_verification_type,
     render_notification_template,
 )
+
+risk_governor = create_risk_governor(db_manager)
 
 
 MANUAL_VERIFICATION_CONTEXTS = {
@@ -713,7 +716,7 @@ class XianyuLive:
                 return default
 
         return {
-            'enabled': _to_bool(enabled_raw, False),
+            'enabled': _to_bool(enabled_raw, True),
             'start_hour': _to_hour(start_raw, 1),
             'end_hour': _to_hour(end_raw, 6),
         }
@@ -6754,6 +6757,10 @@ class XianyuLive:
                     self.last_token_refresh_error_message = json.dumps(res_json, ensure_ascii=False, separators=(',', ':'))
                     self._clear_pending_slider_success_notice("Token刷新最终失败")
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
+                    try:
+                        risk_governor.record_failure(self.cookie_id, "token_refresh", res_json)
+                    except Exception as risk_error:
+                        logger.debug(f"【{self.cookie_id}】记录Token刷新风控失败: {risk_error}")
 
                     # 清空当前token，确保下次重试时重新获取
                     self.current_token = None
@@ -6782,6 +6789,10 @@ class XianyuLive:
             self.last_token_refresh_error_message = self._safe_str(e)
             self._clear_pending_slider_success_notice("Token刷新异常")
             logger.error(f"Token刷新异常: {self._safe_str(e)}")
+            try:
+                risk_governor.record_failure(self.cookie_id, "token_refresh", e)
+            except Exception as risk_error:
+                logger.debug(f"【{self.cookie_id}】记录Token刷新异常风控失败: {risk_error}")
 
             # 清空当前token，确保下次重试时重新获取
             self.current_token = None

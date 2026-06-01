@@ -4363,9 +4363,9 @@ async function loadCookies() {
             </div>
         </td>
         <td class="align-middle">
-            <div class="remark-cell" data-cookie-id="${cookie.id}">
-                <span class="remark-display" onclick="editRemark('${cookie.id}', '${(cookie.remark || '').replace(/'/g, '&#39;')}')" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
-                    ${cookie.remark || '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
+            <div class="remark-cell" data-cookie-id="${encodeURIComponent(cookie.id)}">
+                <span class="remark-display" onclick="editRemark(decodeURIComponent('${encodeURIComponent(cookie.id)}'), decodeURIComponent('${encodeURIComponent(cookie.remark || '')}'))" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
+                    ${cookie.remark ? escapeHtml(cookie.remark) : '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
                 </span>
             </div>
         </td>
@@ -4704,6 +4704,7 @@ async function openAccountEditModal(accountData) {
     document.getElementById('accountEditId').value = accountData.id;
     document.getElementById('editAccountCookie').value = accountData.value || '';
     document.getElementById('editAccountUsername').value = accountData.username || '';
+    document.getElementById('editAccountRemark').value = accountData.remark || '';
     document.getElementById('editAccountPassword').value = accountData.password || '';
     document.getElementById('editAccountShowBrowser').checked = accountData.show_browser || false;
 
@@ -4761,6 +4762,7 @@ async function saveAccountEdit() {
     const id = document.getElementById('accountEditId').value;
     const cookie = document.getElementById('editAccountCookie').value.trim();
     const username = document.getElementById('editAccountUsername').value.trim();
+    const remark = document.getElementById('editAccountRemark').value.trim();
     const password = document.getElementById('editAccountPassword').value.trim();
     const showBrowser = document.getElementById('editAccountShowBrowser').checked;
 
@@ -4799,6 +4801,7 @@ async function saveAccountEdit() {
                 value: cookie,
                 username: username,
                 password: password,
+                remark: remark,
                 show_browser: showBrowser
             })
         });
@@ -15010,7 +15013,7 @@ async function exportKeywords() {
 // 编辑备注
 function editRemark(cookieId, currentRemark) {
     console.log('editRemark called:', cookieId, currentRemark); // 调试信息
-    const remarkCell = document.querySelector(`[data-cookie-id="${cookieId}"] .remark-display`);
+    const remarkCell = document.querySelector(`[data-cookie-id="${encodeURIComponent(cookieId)}"] .remark-display`);
     if (!remarkCell) {
         console.log('remarkCell not found'); // 调试信息
         return;
@@ -15072,8 +15075,8 @@ function editRemark(cookieId, currentRemark) {
             if (response.ok) {
                 // 更新显示
                 remarkCell.innerHTML = `
-                    <span class="remark-display" onclick="editRemark('${cookieId}', '${newRemark.replace(/'/g, '&#39;')}')" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
-                        ${newRemark || '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
+                    <span class="remark-display" onclick="editRemark(decodeURIComponent('${encodeURIComponent(cookieId)}'), decodeURIComponent('${encodeURIComponent(newRemark)}'))" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
+                        ${newRemark ? escapeHtml(newRemark) : '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
                     </span>
                 `;
                 showToast('备注更新成功', 'success');

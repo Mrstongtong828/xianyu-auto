@@ -14,13 +14,15 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from db_manager import db_manager
+from risk_governor import create_risk_governor
 from utils.rate_service import RateService
 
 
-DEFAULT_INTERVAL_SECONDS = int(os.getenv("AUTO_RATE_TASK_INTERVAL_SECONDS", "300") or 300)
-DEFAULT_BATCH_LIMIT = int(os.getenv("AUTO_RATE_TASK_BATCH_LIMIT", "5") or 5)
+DEFAULT_INTERVAL_SECONDS = int(os.getenv("AUTO_RATE_TASK_INTERVAL_SECONDS", "900") or 900)
+DEFAULT_BATCH_LIMIT = int(os.getenv("AUTO_RATE_TASK_BATCH_LIMIT", "1") or 1)
 DEFAULT_LOOKBACK_DAYS = int(os.getenv("AUTO_RATE_TASK_LOOKBACK_DAYS", "10") or 10)
-DEFAULT_COOLDOWN_MINUTES = int(os.getenv("AUTO_RATE_TASK_COOLDOWN_MINUTES", "30") or 30)
+DEFAULT_COOLDOWN_MINUTES = int(os.getenv("AUTO_RATE_TASK_COOLDOWN_MINUTES", "120") or 120)
+risk_governor = create_risk_governor(db_manager)
 
 
 def _status_from_result(result: Dict[str, Any]) -> str:
@@ -43,6 +45,12 @@ async def rate_order_once(
     cookie_id = str(cookie_id or "").strip()
     order_id = str(order_id or "").strip()
     batch_id = batch_id or f"{source}_{uuid.uuid4()}"
+
+    decision = risk_governor.check(cookie_id, "auto_rate")
+    if not decision.allowed:
+        message = f"风控保护跳过自动评价：{decision.reason or decision.status}"
+        db_manager.add_scheduled_rate_log(batch_id, cookie_id, order_id=order_id, status=decision.status, message=message)
+        return {"success": False, "message": message, "status": decision.status}
 
     order_info = db_manager.get_order_by_id(order_id)
     if not order_info:
@@ -89,8 +97,10 @@ async def rate_order_once(
             buyer_id=order_info.get("buyer_id"), buyer_nick=order_info.get("buyer_nick"),
             comment=comment, status="cookie_expired", message=message,
         )
+        risk_governor.record_failure(cookie_id, "auto_rate", message)
         return {"success": False, "message": message, "status": "cookie_expired"}
 
+    await risk_governor.wait_before_action(cookie_id, "auto_rate")
     rate_service = RateService(cookie_string, account_id=cookie_id)
     result = await rate_service.rate_buyer(order_id, comment)
     status = _status_from_result(result)
@@ -111,8 +121,10 @@ async def rate_order_once(
 
     if result.get("success"):
         db_manager.mark_order_rated(order_id, True)
+        risk_governor.record_success(cookie_id, "auto_rate")
     else:
         db_manager.mark_order_rated(order_id, False, message)
+        risk_governor.record_failure(cookie_id, "auto_rate", message or status)
 
     return {
         "success": bool(result.get("success")),
@@ -145,6 +157,11 @@ async def run_auto_rate_batch(
     all_cookies = db_manager.get_all_cookies()
     for cookie_id in list(all_cookies.keys()):
         try:
+            decision = risk_governor.check(cookie_id, "auto_rate")
+            if not decision.allowed:
+                logger.warning(f"【{cookie_id}】自动评价被风控保护跳过: {decision.status} {decision.reason}")
+                stats["skipped"] += 1
+                continue
             if not db_manager.get_auto_comment(cookie_id):
                 continue
             stats["accounts"] += 1
@@ -178,9 +195,10 @@ async def run_auto_rate_batch(
                     stats["skipped"] += 1
                 else:
                     stats["failed"] += 1
-                await asyncio.sleep(1)
+                await asyncio.sleep(risk_governor.jitter_delay("auto_rate"))
         except Exception as exc:
             stats["failed"] += 1
+            risk_governor.record_failure(cookie_id, "auto_rate", exc)
             logger.error(f"【{cookie_id}】自动补评价账号处理异常: {exc}")
 
     stats["duration_seconds"] = round(time.time() - started_at, 2)
@@ -191,7 +209,7 @@ async def run_auto_rate_batch(
 
 async def auto_rate_task_loop(interval_seconds: int = DEFAULT_INTERVAL_SECONDS):
     """后台自动补评价循环。"""
-    interval_seconds = max(60, int(interval_seconds or DEFAULT_INTERVAL_SECONDS))
+    interval_seconds = max(600, int(interval_seconds or DEFAULT_INTERVAL_SECONDS))
     logger.info(f"自动补评价任务已启动，检查间隔 {interval_seconds} 秒")
     while True:
         try:
