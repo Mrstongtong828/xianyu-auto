@@ -307,7 +307,7 @@ XIANYU_PUBLISH_SELECTOR_CONFIG=config/item_publish_selectors.json
   - Docker Compose 国内配置: http://localhost:8000/health
   - 本地运行: http://localhost:8090/health
 
-> ⚠️ **安全提示**：首次登录后请立即修改默认密码！
+> ⚠️ **安全提示**：公网部署前必须设置强随机 `JWT_SECRET_KEY`，并在首次登录后立即修改默认 `admin/admin123` 密码！
 
 
 ## 📋 系统使用
@@ -318,7 +318,7 @@ XIANYU_PUBLISH_SELECTOR_CONFIG=config/item_publish_selectors.json
 - 根据系统配置完成图形验证码校验
 
 > 📧 **邮箱验证码发送说明**：系统发送邮箱验证码需要配置邮件服务。  
-> 请使用管理员账号登录后，在【系统设置】中配置 SMTP（服务器、端口、账号、密码、发件人等）。未配置或邮件服务不可用时，注册页会提示验证码发送失败。
+> 请使用管理员账号登录后，在【系统设置】中配置 SMTP（服务器、端口、账号、密码/授权码、发件人等），或在 `.env`/Docker 环境变量中配置 `SMTP_SERVER`、`SMTP_PORT`、`SMTP_USER`、`SMTP_PASSWORD`、`SMTP_FROM`、`SMTP_USE_TLS`、`SMTP_USE_SSL`。Gmail 需要开启两步验证并使用应用专用密码。未配置或邮件服务不可用时，注册页会提示验证码发送失败。
 
 ### 2. 添加闲鱼账号
 - 登录系统后进入主界面

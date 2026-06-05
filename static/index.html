@@ -71,89 +71,130 @@
       </button>
     </div>
     <nav class="sidebar-nav">
-      <div class="nav-item" data-menu-id="dashboard">
-        <a href="javascript:void(0)" class="nav-link active" onclick="showSection('dashboard')">
-          <i class="bi bi-speedometer2"></i>
-          <span>仪表盘</span>
-        </a>
+      <div class="nav-group" data-menu-group="overview">
+        <div class="nav-divider nav-group-title">
+          <small class="text-white-50">总览</small>
+        </div>
+        <div class="nav-item" data-menu-id="dashboard">
+          <a href="javascript:void(0)" class="nav-link active" onclick="showSection('dashboard')">
+            <i class="bi bi-speedometer2"></i>
+            <span>仪表盘</span>
+          </a>
+        </div>
       </div>
-      <div class="nav-item" data-menu-id="accounts">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('accounts')">
-          <i class="bi bi-person-circle"></i>
-          <span>账号管理</span>
-        </a>
+
+      <div class="nav-group" data-menu-group="operations">
+        <div class="nav-divider nav-group-title">
+          <small class="text-white-50">经营管理</small>
+        </div>
+        <div class="nav-item" data-menu-id="accounts">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('accounts')">
+            <i class="bi bi-person-circle"></i>
+            <span>账号管理</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="item-publish">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('item-publish')">
+            <i class="bi bi-bag-plus"></i>
+            <span>商品发布</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="items">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('items')">
+            <i class="bi bi-box-seam"></i>
+            <span>商品管理</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="orders">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('orders')">
+            <i class="bi bi-receipt-cutoff"></i>
+            <span>订单管理</span>
+          </a>
+        </div>
       </div>
-      <div class="nav-item" data-menu-id="backgrounds">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('backgrounds')">
-          <i class="bi bi-hdd-network"></i>
-          <span>后台管理</span>
-        </a>
+
+      <div class="nav-group" data-menu-group="fulfillment">
+        <div class="nav-divider nav-group-title">
+          <small class="text-white-50">回复与履约</small>
+        </div>
+        <div class="nav-item" data-menu-id="auto-reply">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('auto-reply')">
+            <i class="bi bi-chat-left-text"></i>
+            <span>自动回复</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="items-reply">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('items-reply')">
+            <i class="bi bi-chat-left-text"></i>
+            <span>指定商品回复</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="cards">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('cards')">
+            <i class="bi bi-credit-card"></i>
+            <span>卡券管理</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="auto-delivery">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('auto-delivery')">
+            <i class="bi bi-truck"></i>
+            <span>自动发货</span>
+          </a>
+        </div>
       </div>
-      <div class="nav-item" data-menu-id="item-publish">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('item-publish')">
-          <i class="bi bi-bag-plus"></i>
-          <span>商品发布</span>
-        </a>
+
+      <div class="nav-group" data-menu-group="communication">
+        <div class="nav-divider nav-group-title">
+          <small class="text-white-50">消息与客服</small>
+        </div>
+        <div class="nav-item" data-menu-id="notification-channels">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('notification-channels')">
+            <i class="bi bi-bell"></i>
+            <span>通知渠道</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="message-notifications">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('message-notifications')">
+            <i class="bi bi-chat-dots"></i>
+            <span>消息通知</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="online-im">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('online-im')">
+            <i class="bi bi-headset"></i>
+            <span>在线客服</span>
+          </a>
+        </div>
       </div>
-      <div class="nav-item" data-menu-id="items">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('items')">
-          <i class="bi bi-box-seam"></i>
-          <span>商品管理</span>
-        </a>
+
+      <div class="nav-group" data-menu-group="security">
+        <div class="nav-divider nav-group-title">
+          <small class="text-white-50">风控安全</small>
+        </div>
+        <div class="nav-item" data-menu-id="blacklist">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('blacklist')">
+            <i class="bi bi-person-x"></i>
+            <span>黑名单管理</span>
+          </a>
+        </div>
       </div>
-      <div class="nav-item" data-menu-id="orders">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('orders')">
-          <i class="bi bi-receipt-cutoff"></i>
-          <span>订单管理</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="auto-reply">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('auto-reply')">
-          <i class="bi bi-chat-left-text"></i>
-          <span>自动回复</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="items-reply">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('items-reply')">
-          <i class="bi bi-chat-left-text"></i>
-          <span>指定商品回复</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="cards">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('cards')">
-          <i class="bi bi-credit-card"></i>
-          <span>卡券管理</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="auto-delivery">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('auto-delivery')">
-          <i class="bi bi-truck"></i>
-          <span>自动发货</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="notification-channels">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('notification-channels')">
-          <i class="bi bi-bell"></i>
-          <span>通知渠道</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="message-notifications">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('message-notifications')">
-          <i class="bi bi-chat-dots"></i>
-          <span>消息通知</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="online-im">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('online-im')">
-          <i class="bi bi-headset"></i>
-          <span>在线客服</span>
-        </a>
-      </div>
-      <div class="nav-item" data-menu-id="system-settings">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('system-settings')">
-          <i class="bi bi-gear"></i>
-          <span>系统设置</span>
-        </a>
+
+      <div class="nav-group" data-menu-group="system">
+        <div class="nav-divider nav-group-title">
+          <small class="text-white-50">系统</small>
+        </div>
+        <div class="nav-item" data-menu-id="system-settings">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('system-settings')">
+            <i class="bi bi-gear"></i>
+            <span>系统设置</span>
+          </a>
+        </div>
+        <div class="nav-item" data-menu-id="about">
+          <a href="javascript:void(0)" class="nav-link" onclick="showSection('about')">
+            <i class="bi bi-info-circle"></i>
+            <span>关于</span>
+          </a>
+        </div>
       </div>
 
       <!-- 管理员专用菜单 -->
@@ -187,15 +228,8 @@
         </div>
       </div>
 
-      <div class="nav-item" data-menu-id="about">
-        <a href="javascript:void(0)" class="nav-link" onclick="showSection('about')">
-          <i class="bi bi-info-circle"></i>
-          <span>关于</span>
-        </a>
-      </div>
-
       <!-- 底部分隔符 -->
-      <div class="nav-divider mt-3 mb-2">
+      <div class="nav-divider mt-3 mb-2" data-sidebar-footer="true">
         <small class="text-white-50">系统操作</small>
       </div>
       <div class="nav-item">
@@ -452,73 +486,6 @@
       </div>
     </div>
 
-    <!-- 后台管理内容 -->
-    <div id="backgrounds-section" class="content-section">
-      <div class="content-header">
-        <h2 class="mb-0">
-          <i class="bi bi-hdd-network me-2"></i>
-          后台管理
-        </h2>
-        <p class="text-muted mb-0">只允许一个账号后台运行，降低系统占用</p>
-      </div>
-      <div class="content-body">
-        <div class="card mb-4">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <span><i class="bi bi-activity me-2"></i>运行状态</span>
-            <div class="d-flex gap-2">
-              <button class="btn btn-sm btn-outline-primary" onclick="loadBackgroundManager()">
-                <i class="bi bi-arrow-clockwise me-1"></i>刷新
-              </button>
-              <button class="btn btn-sm btn-outline-danger" onclick="stopAllBackgrounds()">
-                <i class="bi bi-stop-circle me-1"></i>停止全部
-              </button>
-            </div>
-          </div>
-          <div class="card-body">
-            <div class="row g-3 mb-3">
-              <div class="col-md-4">
-                <div class="border rounded p-3 h-100">
-                  <div class="text-muted small">当前后台</div>
-                  <div class="fw-bold fs-5" id="backgroundActiveAccount">加载中...</div>
-                </div>
-              </div>
-              <div class="col-md-4">
-                <div class="border rounded p-3 h-100">
-                  <div class="text-muted small">运行数量</div>
-                  <div class="fw-bold fs-5" id="backgroundRunningCount">-</div>
-                </div>
-              </div>
-              <div class="col-md-4">
-                <div class="border rounded p-3 h-100">
-                  <div class="text-muted small">限制</div>
-                  <div class="fw-bold fs-5" id="backgroundLimit">最多 1 个后台</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="table-responsive">
-              <table class="table table-hover align-middle">
-                <thead>
-                  <tr>
-                    <th>账号</th>
-                    <th>备注</th>
-                    <th>状态</th>
-                    <th>连接</th>
-                    <th class="text-end">操作</th>
-                  </tr>
-                </thead>
-                <tbody id="backgroundAccountsTableBody">
-                  <tr>
-                    <td colspan="5" class="text-center text-muted py-4">正在加载...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- 账号管理内容 -->
     <div id="accounts-section" class="content-section">
       <div class="content-header">
@@ -561,13 +528,7 @@
                     <i class="bi bi-arrow-repeat me-2"></i>
                     <span class="fw-bold">手动刷新 Cookie</span>
                     <br>
-                    <small class="opacity-75">打开浏览器后自行选择验证方式</small>
-                  </button>
-                  <button type="button" class="btn btn-outline-info btn-lg flex-fill credential-config-btn" onclick="toggleCredentialConfigForm()" style="max-width: 300px;">
-                    <i class="bi bi-person-gear me-2"></i>
-                    <span class="fw-bold">配置账密</span>
-                    <br>
-                    <small class="opacity-75">为已有账号单独保存用户名和密码</small>
+                    <small class="opacity-75">使用已保存账密手动刷新已有账号</small>
                   </button>
                   <button type="button" class="btn btn-outline-secondary btn-lg flex-fill manual-input-btn" onclick="toggleManualInput()" style="max-width: 300px;">
                     <i class="bi bi-keyboard me-2"></i>
@@ -580,60 +541,7 @@
             </div>
 
             <div class="text-center text-muted small mb-4">
-              建议优先使用扫码登录或账密登录添加账号，并尽快配置账密。自动刷新 Cookie 需要已保存账密；手动刷新 Cookie 会打开浏览器，可自行选择扫码、密码或其他验证方式。
-            </div>
-
-            <!-- 配置账密表单（默认隐藏） -->
-            <div id="credentialConfigForm" style="display: none;">
-              <div class="alert alert-info">
-                <i class="bi bi-person-gear me-2"></i>
-                <strong>提示：</strong>这里保存的账号密码用于账密登录和自动刷新 Cookie；手动刷新 Cookie 不会自动输入密码。
-              </div>
-              <form id="credentialConfigFormElement" class="row g-3">
-                <div class="col-md-4">
-                  <label for="credentialConfigAccountSelect" class="form-label">选择账号</label>
-                  <select class="form-select" id="credentialConfigAccountSelect" required>
-                    <option value="">请选择账号...</option>
-                  </select>
-                </div>
-                <div class="col-md-4">
-                  <label for="credentialConfigUsername" class="form-label">登录账号</label>
-                  <input type="text" class="form-control" id="credentialConfigUsername" placeholder="手机号、邮箱或闲鱼登录名" required>
-                </div>
-                <div class="col-md-4">
-                  <label for="credentialConfigPassword" class="form-label">登录密码</label>
-                  <input type="password" class="form-control" id="credentialConfigPassword" placeholder="请输入登录密码" required>
-                </div>
-                <div class="col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="credentialConfigShowBrowser">
-                    <label class="form-check-label" for="credentialConfigShowBrowser">
-                      账密流程显示浏览器
-                    </label>
-                  </div>
-                  <div class="form-text">仅建议本机排查验证页面时开启，服务器环境不要开启。</div>
-                </div>
-                <div class="col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="credentialConfigAutoRefresh" checked>
-                    <label class="form-check-label" for="credentialConfigAutoRefresh">
-                      自动刷新 Cookie
-                    </label>
-                  </div>
-                  <div class="form-text">开启后账号运行时会按周期自动尝试刷新 Cookie。</div>
-                </div>
-                <div class="col-12">
-                  <button type="submit" class="btn btn-info text-white">
-                    <i class="bi bi-check-lg me-1"></i>保存账密配置
-                  </button>
-                  <button type="button" class="btn btn-outline-warning ms-2" onclick="toggleRefreshCookieForm()">
-                    <i class="bi bi-arrow-repeat me-1"></i>去手动刷新
-                  </button>
-                  <button type="button" class="btn btn-secondary ms-2" onclick="toggleCredentialConfigForm()">
-                    <i class="bi bi-x-circle me-1"></i>取消
-                  </button>
-                </div>
-              </form>
+              建议优先使用扫码登录或账密登录添加账号，并尽快配置账密。未配置账密时，账号掉线后部分风控与恢复场景可能无法继续处理；如遇掉线，可优先尝试扫码登录或手动刷新 Cookie。
             </div>
 
             <!-- 账号密码登录表单（默认隐藏） -->
@@ -685,13 +593,9 @@
                   <label for="cookieId" class="form-label">账号ID</label>
                   <input type="text" class="form-control" id="cookieId" placeholder="唯一标识" required>
                 </div>
-                <div class="col-md-5">
+                <div class="col-md-9">
                   <label for="cookieValue" class="form-label">Cookie值</label>
                   <input type="text" class="form-control" id="cookieValue" placeholder="完整Cookie字符串" required>
-                </div>
-                <div class="col-md-4">
-                  <label for="cookieRemark" class="form-label">备注</label>
-                  <input type="text" class="form-control" id="cookieRemark" maxlength="100" placeholder="例如：主号、售后号">
                 </div>
                 <div class="col-12">
                   <div class="form-check">
@@ -716,7 +620,7 @@
             <div id="refreshCookieForm" style="display: none;">
               <div class="alert alert-warning">
                 <i class="bi bi-exclamation-triangle me-2"></i>
-                <strong>提示：</strong>用于已有账号的手动验证刷新。启动后会打开浏览器，请自行选择扫码、密码或其他验证方式，完成后系统会自动读取并刷新当前账号 Cookie。
+                <strong>提示：</strong>用于已有账号的手动账密刷新。本流程会读取该账号已保存的用户名和密码，并刷新当前账号 Cookie。
               </div>
               <form id="refreshCookieFormElement" class="row g-3">
                 <div class="col-md-6">
@@ -733,26 +637,15 @@
                 </div>
                 <div class="col-12">
                   <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="refreshCookieShowBrowser" value="1" checked disabled>
+                    <input class="form-check-input" type="checkbox" id="refreshCookieShowBrowser" value="1">
                     <label class="form-check-label" for="refreshCookieShowBrowser">
-                      刷新时固定打开浏览器窗口，便于完成扫码/人脸验证
-                    </label>
-                  </div>
-                </div>
-                <div class="col-12">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="refreshCookieAutoRefresh" value="1">
-                    <label class="form-check-label" for="refreshCookieAutoRefresh">
-                      自动刷新 Cookie（保存到该账号配置）
+                      显示浏览器窗口（仅影响本次刷新，不会改变自动刷新的设置；如果使用服务器，请勿打开该开关）
                     </label>
                   </div>
                 </div>
                 <div class="col-12">
                   <button type="submit" class="btn btn-warning">
                     <i class="bi bi-arrow-repeat me-1"></i>验证并刷新Cookie
-                  </button>
-                  <button type="button" class="btn btn-outline-info ms-2" onclick="openCredentialConfigFromRefresh()">
-                    <i class="bi bi-person-gear me-1"></i>配置自动刷新账密
                   </button>
                   <button type="button" class="btn btn-secondary ms-2" onclick="toggleRefreshCookieForm()">
                     <i class="bi bi-x-circle me-1"></i>取消
@@ -1219,8 +1112,7 @@
                     <th style="width: 10%">商品ID</th>
                     <th style="width: 16%">商品标题</th>
                     <th style="width: 18%">商品详情</th>
-                    <th style="width: 10%">商品价格</th>
-                    <th style="width: 10%">购买链接</th>
+                    <th style="width: 18%">商品价格</th>
                     <th style="width: 8%">多规格</th>
                     <th style="width: 8%">多数量发货</th>
                     <th style="width: 10%">更新时间</th>
@@ -1229,7 +1121,7 @@
                 </thead>
                 <tbody id="itemsTableBody">
                   <tr>
-                    <td colspan="11" class="text-center text-muted">加载中...</td>
+                    <td colspan="10" class="text-center text-muted">加载中...</td>
                   </tr>
                 </tbody>
               </table>
@@ -1281,8 +1173,7 @@
       </div>
     </div>
 
-    <!-- 发布商品内容 -->
-    <!-- 指定商品自动管理内容 -->
+     <!-- 指定商品自动管理内容 -->
     <div id="items-reply-section" class="content-section">
       <div class="content-header">
         <h2 class="mb-0">
@@ -2843,42 +2734,6 @@
       </div>
 
       <div class="content-body">
-        <div class="risk-health-banner mb-3" id="riskHealthSummaryCard">
-          <div class="risk-health-main">
-            <div class="risk-health-icon" id="riskHealthIcon">
-              <i class="bi bi-shield-check"></i>
-            </div>
-            <div>
-              <div class="risk-tool-card-kicker">风控健康摘要</div>
-              <h5 class="mb-1" id="riskHealthTitle">正在检查风控状态...</h5>
-              <p class="mb-0 text-muted" id="riskHealthSubtitle">汇总近 24 小时失败、处理中和账号保护情况</p>
-            </div>
-          </div>
-          <div class="risk-health-metrics">
-            <div class="risk-health-metric">
-              <span>失败事件</span>
-              <strong id="riskHealthFailedCount">--</strong>
-            </div>
-            <div class="risk-health-metric">
-              <span>处理中</span>
-              <strong id="riskHealthProcessingCount">--</strong>
-            </div>
-            <div class="risk-health-metric">
-              <span>保护账号</span>
-              <strong id="riskHealthProtectedCount">--</strong>
-            </div>
-          </div>
-          <div class="risk-health-actions">
-            <button class="btn btn-sm btn-outline-primary" onclick="loadRiskHealthSummary()">
-              <i class="bi bi-arrow-clockwise me-1"></i>刷新摘要
-            </button>
-          </div>
-          <div class="risk-health-recommendations" id="riskHealthRecommendations">
-            <span class="text-muted small">正在生成建议...</span>
-          </div>
-          <div class="risk-health-hotspots" id="riskHealthHotspots" style="display: none;"></div>
-        </div>
-
         <!-- 风控日志控制面板 -->
         <div class="risk-log-toolbar-wrap mb-4">
           <div class="row g-3 align-items-stretch risk-log-toolbar">
@@ -3095,7 +2950,7 @@
           <i class="bi bi-headset me-2"></i>
           在线客服
         </h2>
-        <p class="text-muted mb-0">自建聊天界面，支持会话浏览、实时收发与商品回复联动</p>
+        <p class="text-muted mb-0">直连闲鱼IM会话，支持实时收发、历史分页与商品回复联动</p>
       </div>
       <div class="content-body p-0" style="flex: 1; overflow: hidden;">
         <div class="d-flex h-100" id="chatContainer">
@@ -3323,6 +3178,154 @@
       </div>
     </div>
 
+    <!-- 黑名单管理内容 -->
+    <div id="blacklist-section" class="content-section">
+      <div class="content-header">
+        <div class="d-flex justify-content-between align-items-center w-100 flex-wrap gap-2">
+          <div>
+            <h2 class="mb-0">
+              <i class="bi bi-person-x me-2"></i>
+              黑名单管理
+            </h2>
+            <p class="text-muted mb-0">按用户、账号或商品范围拦截指定买家的自动回复、客服发送和自动发货</p>
+          </div>
+          <div class="d-flex gap-2 flex-wrap">
+            <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('blacklistImportFile').click()">
+              <i class="bi bi-upload me-1"></i>导入
+            </button>
+            <button type="button" class="btn btn-outline-success" onclick="exportPersonalBlacklist()">
+              <i class="bi bi-download me-1"></i>导出
+            </button>
+            <input type="file" id="blacklistImportFile" accept=".xlsx" class="d-none" onchange="importPersonalBlacklistFile()">
+          </div>
+        </div>
+      </div>
+      <div class="content-body">
+        <div class="row g-4">
+          <div class="col-lg-4">
+            <div class="card h-100">
+              <div class="card-header">
+                <i class="bi bi-plus-circle me-2"></i>新增个人黑名单
+              </div>
+              <div class="card-body">
+                <form id="personalBlacklistForm" onsubmit="event.preventDefault(); createPersonalBlacklist(); return false;">
+                  <div class="mb-3">
+                    <label for="blacklistBuyerIds" class="form-label">买家ID <span class="text-danger">*</span></label>
+                    <textarea class="form-control" id="blacklistBuyerIds" rows="4" placeholder="每行一个买家ID，也支持逗号分隔" required></textarea>
+                  </div>
+                  <div class="mb-3">
+                    <label for="blacklistCookieId" class="form-label">作用账号</label>
+                    <select class="form-select" id="blacklistCookieId">
+                      <option value="">全部账号</option>
+                    </select>
+                    <div class="form-text">选择账号后仅拦截该账号；留空为用户级。</div>
+                  </div>
+                  <div class="mb-3">
+                    <label for="blacklistItemId" class="form-label">商品ID</label>
+                    <input type="text" class="form-control" id="blacklistItemId" placeholder="可选，填写后仅拦截该商品">
+                  </div>
+                  <div class="mb-3">
+                    <label for="blacklistBuyerNick" class="form-label">买家昵称</label>
+                    <input type="text" class="form-control" id="blacklistBuyerNick" placeholder="可选，便于识别">
+                  </div>
+                  <div class="mb-3">
+                    <label for="blacklistReason" class="form-label">拉黑原因</label>
+                    <textarea class="form-control" id="blacklistReason" rows="2" placeholder="可选，会显示在拦截提示和发货日志中"></textarea>
+                  </div>
+                  <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="blacklistEnabled" checked>
+                    <label class="form-check-label" for="blacklistEnabled">立即启用</label>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary flex-fill">
+                      <i class="bi bi-check-circle me-1"></i>保存
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="resetPersonalBlacklistForm()">
+                      <i class="bi bi-arrow-counterclockwise"></i>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-lg-8">
+            <div class="card">
+              <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <div>
+                    <i class="bi bi-list-check me-2"></i>个人黑名单
+                    <span class="text-muted small ms-2" id="blacklistTotalText">共 0 条</span>
+                  </div>
+                  <button type="button" class="btn btn-outline-danger btn-sm" id="blacklistBatchDeleteBtn" onclick="batchDeletePersonalBlacklist()" disabled>
+                    <i class="bi bi-trash me-1"></i>批量删除
+                  </button>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="row g-2 align-items-end mb-3">
+                  <div class="col-md-4">
+                    <label for="blacklistFilterBuyerId" class="form-label small mb-1">买家ID</label>
+                    <input type="text" class="form-control form-control-sm" id="blacklistFilterBuyerId" placeholder="搜索买家ID" onkeydown="handleBlacklistFilterKeydown(event)">
+                  </div>
+                  <div class="col-md-4">
+                    <label for="blacklistFilterBuyerNick" class="form-label small mb-1">买家昵称</label>
+                    <input type="text" class="form-control form-control-sm" id="blacklistFilterBuyerNick" placeholder="搜索昵称" onkeydown="handleBlacklistFilterKeydown(event)">
+                  </div>
+                  <div class="col-md-2">
+                    <label for="blacklistPageSize" class="form-label small mb-1">每页</label>
+                    <select class="form-select form-select-sm" id="blacklistPageSize" onchange="loadPersonalBlacklist(1)">
+                      <option value="10">10</option>
+                      <option value="20" selected>20</option>
+                      <option value="50">50</option>
+                      <option value="100">100</option>
+                    </select>
+                  </div>
+                  <div class="col-md-2 d-flex gap-2">
+                    <button type="button" class="btn btn-primary btn-sm flex-fill" onclick="loadPersonalBlacklist(1)">
+                      <i class="bi bi-search"></i>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="resetBlacklistFilters()">
+                      <i class="bi bi-x-circle"></i>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="table-responsive">
+                  <table class="table table-hover align-middle">
+                    <thead>
+                      <tr>
+                        <th style="width: 36px;"><input class="form-check-input" type="checkbox" id="blacklistSelectAll" onchange="toggleBlacklistSelectAll(this.checked)"></th>
+                        <th>范围</th>
+                        <th>买家</th>
+                        <th>目标</th>
+                        <th>原因</th>
+                        <th>状态</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="blacklistTableBody">
+                      <tr>
+                        <td colspan="8" class="text-center py-4 text-muted">
+                          <i class="bi bi-person-x fs-1 d-block mb-3"></i>
+                          暂无黑名单记录
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3">
+                  <div class="small text-muted" id="blacklistPageText">第 1 页</div>
+                  <div class="btn-group" id="blacklistPagination" role="group" aria-label="黑名单分页"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 系统设置内容 -->
     <div id="system-settings-section" class="content-section">
       <div class="content-header">
@@ -3474,57 +3477,6 @@
                       <i class="bi bi-check-circle me-1"></i>保存设置
                     </button>
                   </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 风控保护设置 (仅管理员可见) -->
-        <div id="risk-protection-settings" class="row mt-4" style="display: none;">
-          <div class="col-12">
-            <div class="card">
-              <div class="card-header">
-                <i class="bi bi-shield-exclamation me-2"></i>风控保护设置
-                <span class="badge bg-warning ms-2">管理员专用</span>
-              </div>
-              <div class="card-body">
-                <div class="alert alert-info mb-3">
-                  <i class="bi bi-info-circle me-2"></i>
-                  这些设置用于减少账号在短时间连续失败后的自动重试，并在风控健康状态恶化时通过已配置的通知渠道提醒管理员。
-                </div>
-                <div class="row g-3">
-                  <div class="col-md-3">
-                    <label class="form-label" for="riskThrottleWindowMinutes">熔断统计窗口（分钟）</label>
-                    <input type="number" class="form-control" id="riskThrottleWindowMinutes" min="5" max="1440" value="30">
-                    <div class="form-text">统计最近多久内的真实恢复失败</div>
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label" for="riskThrottleFailureThreshold">失败阈值（次）</label>
-                    <input type="number" class="form-control" id="riskThrottleFailureThreshold" min="1" max="20" value="3">
-                    <div class="form-text">达到阈值后暂停自动账密恢复</div>
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label" for="riskHealthAlertCooldownMinutes">告警冷却（分钟）</label>
-                    <input type="number" class="form-control" id="riskHealthAlertCooldownMinutes" min="5" max="1440" value="60">
-                    <div class="form-text">同级别告警最短发送间隔</div>
-                  </div>
-                  <div class="col-md-3 d-flex align-items-center">
-                    <div>
-                      <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="riskHealthAlertEnabled" checked>
-                        <label class="form-check-label" for="riskHealthAlertEnabled">
-                          <strong>开启风控健康告警</strong>
-                        </label>
-                      </div>
-                      <div class="form-text">状态达到警告或严重时发送通知</div>
-                    </div>
-                  </div>
-                </div>
-                <div class="mt-3">
-                  <button type="button" class="btn btn-primary" onclick="updateRiskProtectionSettings()">
-                    <i class="bi bi-check-circle me-1"></i>保存风控保护设置
-                  </button>
                 </div>
               </div>
             </div>
@@ -4931,7 +4883,7 @@
 
   <!-- JS依赖 -->
   <script src="/static/lib/bootstrap/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/app.js?v=1.2.12"></script>
+  <script src="/static/js/app.js?v=1.2.9"></script>
 
   <!-- 默认回复管理模态框 -->
   <div class="modal fade" id="defaultReplyModal" tabindex="-1" aria-labelledby="defaultReplyModalLabel" aria-hidden="true">
@@ -5565,19 +5517,13 @@
             <div class="mb-3">
               <label class="form-label">用户名</label>
               <input type="text" class="form-control" id="editAccountUsername" placeholder="输入用户名（可选）">
-              <div class="form-text">用于账密登录、自动刷新 Cookie 和自动恢复</div>
-            </div>
-
-            <div class="mb-3">
-              <label class="form-label">账号备注</label>
-              <input type="text" class="form-control" id="editAccountRemark" maxlength="100" placeholder="例如：主号、售后号、数码店 A">
-              <div class="form-text">仅用于后台区分账号，不会发送给买家</div>
+              <div class="form-text">用于账密登录、手动刷新 Cookie 和自动恢复</div>
             </div>
             
             <div class="mb-3">
               <label class="form-label">密码</label>
               <input type="password" class="form-control" id="editAccountPassword" placeholder="输入密码（可选）">
-              <div class="form-text">用于账密登录、自动刷新 Cookie 和自动恢复</div>
+              <div class="form-text">用于账密登录、手动刷新 Cookie 和自动恢复</div>
             </div>
             
             <div class="mb-3">
@@ -5590,7 +5536,7 @@
               </div>
               <div class="form-text text-warning">
                 <i class="bi bi-exclamation-triangle me-1"></i>
-                该设置会影响账密登录和自动恢复流程；手动刷新 Cookie 会固定打开浏览器。仅建议在本机排查滑块、人脸或风控页面时开启，服务器环境不要开启。
+                该设置会影响账密登录、手动刷新 Cookie 和自动恢复流程。仅建议在本机排查滑块、人脸或风控页面时开启，服务器环境不要开启。
               </div>
             </div>
 

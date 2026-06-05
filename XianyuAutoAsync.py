@@ -30,7 +30,6 @@ import aiohttp
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple
 from db_manager import db_manager
-from risk_governor import create_risk_governor
 from utils.notification_dispatcher import (
     build_face_verify_notification,
     dispatch_account_notifications,
@@ -39,8 +38,6 @@ from utils.notification_dispatcher import (
     guess_verification_type,
     render_notification_template,
 )
-
-risk_governor = create_risk_governor(db_manager)
 
 
 MANUAL_VERIFICATION_CONTEXTS = {
@@ -716,7 +713,7 @@ class XianyuLive:
                 return default
 
         return {
-            'enabled': _to_bool(enabled_raw, True),
+            'enabled': _to_bool(enabled_raw, False),
             'start_hour': _to_hour(start_raw, 1),
             'end_hour': _to_hour(end_raw, 6),
         }
@@ -1953,6 +1950,7 @@ class XianyuLive:
         self.last_heartbeat_response = 0
         self.last_sent_heartbeat_mid = None
         self.pending_heartbeat_mids = deque(maxlen=32)
+        self.lwp_response_waiters = {}
         self.heartbeat_task = None
         self.ws = None
         self.last_non_heartbeat_message_time = 0
@@ -3362,6 +3360,81 @@ class XianyuLive:
         delay_task = asyncio.create_task(self._delayed_lock_release(lock_key, delay_minutes=delay_minutes))
         self._lock_hold_info[lock_key]['task'] = delay_task
 
+    def _resolve_blacklist_user_id(self) -> Optional[int]:
+        """获取当前账号归属用户，用于黑名单隔离。"""
+        if self.user_id:
+            try:
+                return int(self.user_id)
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            cookie_details = db_manager.get_cookie_details(self.cookie_id) or {}
+            user_id = cookie_details.get('user_id')
+            return int(user_id) if user_id else None
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】解析黑名单用户归属失败: {self._safe_str(e)}")
+            return None
+
+    def _format_blacklist_block_reason(self, hit: Dict[str, Any], action: str = '自动动作') -> str:
+        scope_label = {
+            'item': '商品级',
+            'account': '账号级',
+            'user': '用户级',
+        }.get((hit or {}).get('scope'), (hit or {}).get('scope') or '未知级别')
+        reason = str((hit or {}).get('reason') or '').strip()
+        reason_part = f"，原因：{reason}" if reason else ''
+        buyer_id = (hit or {}).get('buyer_id') or '未知买家'
+        return f"买家 {buyer_id} 命中个人黑名单 scope={scope_label}{reason_part}，跳过{action}"
+
+    def _check_buyer_blacklist_for_action(self, buyer_id: str = None, item_id: str = None,
+                                          order_id: str = None, buyer_nick: str = None,
+                                          action: str = '自动动作', channel: str = 'auto',
+                                          log_delivery: bool = False) -> Optional[Dict[str, Any]]:
+        """检查买家黑名单，命中时可记录发货跳过日志。"""
+        normalized_buyer_id = str(buyer_id or '').strip()
+        if not normalized_buyer_id:
+            return None
+
+        try:
+            user_id = self._resolve_blacklist_user_id()
+            if not user_id:
+                return None
+
+            hit = db_manager.is_buyer_blacklisted(
+                user_id=user_id,
+                buyer_id=normalized_buyer_id,
+                cookie_id=self.cookie_id,
+                item_id=str(item_id or '').strip() or None,
+            )
+            if not hit:
+                return None
+
+            block_reason = self._format_blacklist_block_reason(hit, action=action)
+            logger.warning(
+                f"【{self.cookie_id}】买家 {normalized_buyer_id} 命中个人黑名单，"
+                f"scope={hit.get('scope')}, item_id={item_id or ''}, order_id={order_id or ''}，跳过{action}"
+            )
+
+            if log_delivery:
+                self._record_delivery_log(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=normalized_buyer_id,
+                    buyer_nick=buyer_nick,
+                    status='skipped',
+                    reason=block_reason,
+                    channel=channel,
+                    rule_meta={'match_mode': 'blacklist'},
+                )
+            return hit
+        except Exception as e:
+            logger.warning(
+                f"【{self.cookie_id}】检查买家黑名单失败: buyer_id={normalized_buyer_id}, "
+                f"item_id={item_id or ''}, error={self._safe_str(e)}"
+            )
+            return None
+
     def _record_delivery_log(self, order_id: str = None, item_id: str = None, buyer_id: str = None,
                              buyer_nick: str = None, status: str = 'failed', reason: str = None,
                              channel: str = 'auto', rule_meta: dict = None):
@@ -4516,6 +4589,16 @@ class XianyuLive:
                     )
                     return
             
+            if self._check_buyer_blacklist_for_action(
+                buyer_id=user_id,
+                item_id=item_id,
+                order_id=order_id,
+                action='自动发货',
+                channel='auto',
+                log_delivery=True,
+            ):
+                return
+
             # 检查订单是否已发货
             if not self.can_auto_delivery(order_id):
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 订单 {order_id} 在冷却期内，跳过发货')
@@ -4866,6 +4949,16 @@ class XianyuLive:
                     )
                     return
 
+            if self._check_buyer_blacklist_for_action(
+                buyer_id=send_user_id,
+                item_id=item_id,
+                buyer_nick=send_user_name,
+                action='自动发货',
+                channel='auto',
+                log_delivery=True,
+            ):
+                return
+
             # 提取订单ID（传递原始消息数据以便在解密消息中找不到时进行备用搜索）
             order_id = self._extract_order_id(message, message_data)
 
@@ -5041,6 +5134,17 @@ class XianyuLive:
                 if (not item_id or item_id == "未知商品") and existing_item_id:
                     item_id = existing_item_id
                     logger.info(f'[{msg_time}] 【{self.cookie_id}】订单一致性校验补全商品ID: {item_id}')
+
+            if self._check_buyer_blacklist_for_action(
+                buyer_id=send_user_id,
+                item_id=item_id,
+                order_id=order_id,
+                buyer_nick=send_user_name,
+                action='自动发货',
+                channel='auto',
+                log_delivery=True,
+            ):
+                return
 
             logger.info(f'[{msg_time}] 【{self.cookie_id}】提取到订单ID: {order_id}，将在自动发货时处理确认发货')
 
@@ -6757,10 +6861,6 @@ class XianyuLive:
                     self.last_token_refresh_error_message = json.dumps(res_json, ensure_ascii=False, separators=(',', ':'))
                     self._clear_pending_slider_success_notice("Token刷新最终失败")
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
-                    try:
-                        risk_governor.record_failure(self.cookie_id, "token_refresh", res_json)
-                    except Exception as risk_error:
-                        logger.debug(f"【{self.cookie_id}】记录Token刷新风控失败: {risk_error}")
 
                     # 清空当前token，确保下次重试时重新获取
                     self.current_token = None
@@ -6789,10 +6889,6 @@ class XianyuLive:
             self.last_token_refresh_error_message = self._safe_str(e)
             self._clear_pending_slider_success_notice("Token刷新异常")
             logger.error(f"Token刷新异常: {self._safe_str(e)}")
-            try:
-                risk_governor.record_failure(self.cookie_id, "token_refresh", e)
-            except Exception as risk_error:
-                logger.debug(f"【{self.cookie_id}】记录Token刷新异常风控失败: {risk_error}")
 
             # 清空当前token，确保下次重试时重新获取
             self.current_token = None
@@ -9071,58 +9167,46 @@ class XianyuLive:
             logger.error(f"更新卡券图片URL失败: {e}")
 
     async def get_ai_reply(self, send_user_name: str, send_user_id: str, send_message: str, item_id: str, chat_id: str):
-        """获取AI回复（兜底逻辑：意图分类 + 动态Prompt加载）"""
+        """获取AI回复"""
         try:
-            from ai_reply_engine import ai_reply_engine, load_prompt, PROMPT_DIR
+            if self._check_buyer_blacklist_for_action(
+                buyer_id=send_user_id,
+                item_id=item_id,
+                buyer_nick=send_user_name,
+                action='AI回复',
+                log_delivery=False,
+            ):
+                return None
+
+            from ai_reply_engine import ai_reply_engine
 
             # 检查是否启用AI回复
             if not ai_reply_engine.is_ai_enabled(self.cookie_id):
                 logger.warning(f"账号 {self.cookie_id} 未启用AI回复")
                 return None
 
-            logger.info(f"【{self.cookie_id}】关键词均未命中，触发AI兜底回复")
-
-            # 获取AI设置（用于分类和回复的API调用）
-            from db_manager import db_manager
-            settings = db_manager.get_ai_reply_settings(self.cookie_id)
-
             # 从数据库获取商品信息
+            from db_manager import db_manager
             item_info_raw = db_manager.get_item_info(self.cookie_id, item_id)
 
             if not item_info_raw:
                 logger.warning(f"数据库中无商品信息: {item_id}")
+                # 使用默认商品信息
                 item_info = {
                     'title': '商品信息获取失败',
                     'price': 0,
                     'desc': '暂无商品描述'
                 }
             else:
+                # 解析数据库中的商品信息
                 item_info = {
                     'title': item_info_raw.get('item_title', '未知商品'),
                     'price': self._parse_price(item_info_raw.get('item_price', '0')),
                     'desc': item_info_raw.get('item_detail', '暂无商品描述')
                 }
 
-            # Step 1: 意图分类
-            intent = ai_reply_engine.classify_user_intent(send_message, settings)
-
-            # Step 2: 处理 no_reply 意图（丢弃消息）
-            if intent == 'no_reply':
-                logger.info(f"【{self.cookie_id}】AI意图为 no_reply，丢弃消息不作回复")
-                return None
-
-            # Step 3: 根据意图加载对应的 Prompt
-            if intent == 'price':
-                system_prompt = load_prompt(os.path.join(PROMPT_DIR, 'price_prompt.txt'))
-                logger.info(f"【{self.cookie_id}】AI路由 → price_prompt")
-            elif intent == 'tech':
-                system_prompt = load_prompt(os.path.join(PROMPT_DIR, 'tech_prompt.txt'))
-                logger.info(f"【{self.cookie_id}】AI路由 → tech_prompt")
-            else:
-                system_prompt = load_prompt(os.path.join(PROMPT_DIR, 'default_prompt.txt'))
-                logger.info(f"【{self.cookie_id}】AI路由 → default_prompt")
-
-            # Step 4: 使用选中的 Prompt 生成回复
+            # 生成AI回复
+            # 由于外部已实现防抖机制，跳过内部等待（skip_wait=True）
             reply = ai_reply_engine.generate_reply(
                 message=send_message,
                 item_info=item_info,
@@ -9130,19 +9214,18 @@ class XianyuLive:
                 cookie_id=self.cookie_id,
                 user_id=send_user_id,
                 item_id=item_id,
-                skip_wait=True,
-                system_prompt_override=system_prompt
+                skip_wait=True  # 跳过内部等待，因为外部已实现防抖
             )
 
             if reply:
-                logger.info(f"【{self.cookie_id}】AI[{intent}]回复生成成功: {reply}")
+                logger.info(f"【{self.cookie_id}】AI回复生成成功: {reply}")
                 return reply
             else:
-                logger.warning(f"【{self.cookie_id}】AI回复生成失败")
+                logger.warning(f"AI回复生成失败")
                 return None
 
         except Exception as e:
-            logger.error(f"【{self.cookie_id}】获取AI回复失败: {self._safe_str(e)}")
+            logger.error(f"获取AI回复失败: {self._safe_str(e)}")
             return None
 
     def _parse_price(self, price_str: str) -> float:
@@ -12087,6 +12170,68 @@ class XianyuLive:
         await ws.send(json.dumps(msg))
         logger.info(f'【{self.cookie_id}】连接注册完成')
 
+    async def _ack_lwp_message(self, ws, message: dict) -> None:
+        try:
+            headers = message.get("headers", {}) if isinstance(message, dict) else {}
+            ack = {
+                "code": 200,
+                "headers": {
+                    "mid": headers.get("mid", generate_mid()),
+                    "sid": headers.get("sid", ""),
+                }
+            }
+            if 'app-key' in headers:
+                ack["headers"]["app-key"] = headers["app-key"]
+            if 'ua' in headers:
+                ack["headers"]["ua"] = headers["ua"]
+            if 'dt' in headers:
+                ack["headers"]["dt"] = headers["dt"]
+            await ws.send(json.dumps(ack))
+        except Exception:
+            pass
+
+    def _resolve_lwp_response_waiter(self, message_data: dict) -> bool:
+        try:
+            headers = message_data.get("headers", {}) if isinstance(message_data, dict) else {}
+            mid = str(headers.get("mid") or "")
+            if not mid:
+                return False
+            future = self.lwp_response_waiters.pop(mid, None)
+            if not future:
+                return False
+            if not future.done():
+                future.set_result(message_data)
+            return True
+        except Exception as e:
+            logger.debug(f"【{self.cookie_id}】分发LWP响应失败: {self._safe_str(e)}")
+            return False
+
+    async def _request_lwp_on_current_ws(self, lwp: str, body: list, timeout: int = 10):
+        ws = self.ws
+        if not ws or getattr(ws, 'closed', False):
+            return {"code": "not_connected", "reason": "账号WebSocket未连接"}
+
+        mid = generate_mid()
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self.lwp_response_waiters[mid] = future
+        try:
+            await ws.send(json.dumps({
+                "lwp": lwp,
+                "headers": {"mid": mid},
+                "body": body,
+            }))
+            response = await asyncio.wait_for(future, timeout=max(1, int(timeout or 10)))
+            return response.get("body", {}) if isinstance(response, dict) else {}
+        except asyncio.TimeoutError:
+            return {"code": "timeout", "reason": "IM请求超时"}
+        except Exception as e:
+            return {"code": "request_failed", "reason": self._safe_str(e)}
+        finally:
+            current = self.lwp_response_waiters.pop(mid, None)
+            if current and not current.done():
+                current.cancel()
+
     async def list_all_conversations(self, cid: str, page_size: int = 20):
         """拉取指定会话的历史消息。"""
         logger.info(f"【{self.cookie_id}】开始通过独立临时连接拉取历史消息: chat_id={cid}, page_size={page_size}")
@@ -12208,6 +12353,85 @@ class XianyuLive:
                     return history_messages
 
         return []
+
+    async def list_newest_conversations(self, start_timestamp: int = None, limit: int = 20):
+        """通过当前主WebSocket拉取最近会话列表，避免临时连接挤掉主监听。"""
+        if start_timestamp in (None, '', 0, '0'):
+            start_timestamp = 9007199254740991
+
+        try:
+            start_timestamp = int(start_timestamp)
+        except (TypeError, ValueError):
+            start_timestamp = 9007199254740991
+
+        try:
+            limit = max(1, min(int(limit or 20), 100))
+        except (TypeError, ValueError):
+            limit = 20
+
+        logger.info(
+            f"【{self.cookie_id}】开始通过主连接拉取最近会话: "
+            f"cursor={start_timestamp}, limit={limit}"
+        )
+
+        last_body = {}
+        for attempt in range(3):
+            body = await self._request_lwp_on_current_ws(
+                "/r/Conversation/listNewestPagination",
+                [start_timestamp, limit],
+                timeout=10,
+            )
+            last_body = body if isinstance(body, dict) else {}
+            if isinstance(last_body, dict) and last_body.get("code") == "400600001" and attempt < 2:
+                wait_seconds = (attempt + 1) * 2
+                logger.warning(
+                    f"【{self.cookie_id}】最近会话拉取被流控，{wait_seconds}秒后重试 "
+                    f"({attempt + 1}/3)"
+                )
+                await asyncio.sleep(wait_seconds)
+                continue
+            logger.info(
+                f"【{self.cookie_id}】最近会话拉取完成: "
+                f"count={len(last_body.get('userConvs', [])) if isinstance(last_body, dict) else 0}"
+            )
+            return last_body
+
+        return last_body
+
+    async def list_conversation_messages_page(self, cid: str, start_timestamp: int = None, limit: int = 20):
+        """通过当前主WebSocket分页拉取指定会话消息，避免临时连接挤掉主监听。"""
+        normalized_cid = str(cid or '').strip()
+        if not normalized_cid:
+            return {"code": "missing_cid", "reason": "缺少会话ID"}
+        full_cid = normalized_cid if '@goofish' in normalized_cid else f"{normalized_cid}@goofish"
+
+        if start_timestamp in (None, '', 0, '0'):
+            start_timestamp = 9007199254740991
+
+        try:
+            start_timestamp = int(start_timestamp)
+        except (TypeError, ValueError):
+            start_timestamp = 9007199254740991
+
+        try:
+            limit = max(1, min(int(limit or 20), 100))
+        except (TypeError, ValueError):
+            limit = 20
+
+        logger.info(
+            f"【{self.cookie_id}】开始通过主连接分页拉取消息: "
+            f"chat_id={normalized_cid}, cursor={start_timestamp}, limit={limit}"
+        )
+        body = await self._request_lwp_on_current_ws(
+            "/r/MessageManager/listUserMessages",
+            [full_cid, False, start_timestamp, limit, False],
+            timeout=10,
+        )
+        logger.info(
+            f"【{self.cookie_id}】分页消息拉取完成: "
+            f"chat_id={normalized_cid}, count={len(body.get('userMessageModels', [])) if isinstance(body, dict) else 0}"
+        )
+        return body if isinstance(body, dict) else {}
 
     async def fetch_conversation_history_once(self, cid: str, page_size: int = 20):
         """使用独立临时实例拉取历史消息，避免影响主连接状态。"""
@@ -14669,6 +14893,16 @@ class XianyuLive:
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】【系统】chat_id {chat_id} 自动回复已暂停，剩余时间: {remaining_minutes}分{remaining_seconds}秒")
                 return
 
+            blacklist_hit = self._check_buyer_blacklist_for_action(
+                buyer_id=send_user_id,
+                item_id=item_id,
+                buyer_nick=send_user_name,
+                action='自动回复',
+                log_delivery=False,
+            )
+            if blacklist_hit:
+                return
+
             reply = None
             reply_source = None
 
@@ -15426,6 +15660,18 @@ class XianyuLive:
                                     
                                     # 继续执行亦凡API调用（带账号）
                                     try:
+                                        if self._check_buyer_blacklist_for_action(
+                                            buyer_id=send_user_id,
+                                            item_id=item_id_saved,
+                                            order_id=order_id_saved,
+                                            buyer_nick=send_user_name,
+                                            action='亦凡账号确认自动发货',
+                                            channel='auto',
+                                            log_delivery=True,
+                                        ):
+                                            logger.info(f"【{self.cookie_id}】[{msg_id}] 亦凡账号确认发货被黑名单拦截")
+                                            return
+
                                         # 直接调用亦凡API下单
                                         delivery_content = await self._call_yifan_api_with_account(
                                             rule, account, order_id_saved, item_id_saved, send_user_id, chat_id
@@ -15976,6 +16222,10 @@ class XianyuLive:
                             async for message in websocket:
                                 try:
                                     message_data = json.loads(message)
+
+                                    if self._resolve_lwp_response_waiter(message_data):
+                                        await self._ack_lwp_message(websocket, message_data)
+                                        continue
                                     
                                     # 提取消息标识用于日志追踪（防止异步处理导致日志混乱）
                                     msg_id = "unknown"

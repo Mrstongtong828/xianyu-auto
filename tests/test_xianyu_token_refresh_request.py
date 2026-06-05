@@ -1,6 +1,9 @@
+import asyncio
 import unittest
+from unittest import mock
 
-from XianyuAutoAsync import XianyuLive
+import config
+from XianyuAutoAsync import ConnectionState, XianyuLive
 
 
 class _FakeTokenRefreshResponse:
@@ -41,6 +44,58 @@ class _FakeSession:
 
 
 class XianyuTokenRefreshRequestTest(unittest.IsolatedAsyncioTestCase):
+    def _make_notification_live(self):
+        live = XianyuLive.__new__(XianyuLive)
+        live.cookie_id = "status_notice_test"
+        live.notification_lock = asyncio.Lock()
+        live.last_notification_time = {}
+        live.pending_notification_keys = set()
+        live.message_stream_notification_cooldown = 60
+        live.token_refresh_notification_cooldown = 18000
+        live.notification_cooldown = 60
+        live._safe_str = lambda exc: str(exc)
+        return live
+
+    async def test_status_token_notifications_are_silent(self):
+        live = self._make_notification_live()
+        status_types = [
+            "token_refresh",
+            "cookie_refresh_success",
+            "password_login_success",
+            "slider_success",
+            "slider_recovered_success",
+        ]
+
+        with mock.patch("XianyuAutoAsync.dispatch_account_notifications", return_value=True) as dispatch_mock:
+            for notification_type in status_types:
+                await live.send_token_refresh_notification(
+                    "刷新Cookie成功" if notification_type == "cookie_refresh_success" else "Token刷新异常",
+                    notification_type,
+                )
+            await live.send_token_refresh_notification(
+                "扫码登录稳定期内，自动密码登录刷新已跳过",
+                "token_refresh",
+            )
+
+        dispatch_mock.assert_not_awaited()
+        self.assertEqual(live.last_notification_time, {})
+        self.assertEqual(live.pending_notification_keys, set())
+
+    async def test_manual_verification_token_notification_still_dispatches(self):
+        live = self._make_notification_live()
+
+        with mock.patch("XianyuAutoAsync.dispatch_account_notifications", return_value=True) as dispatch_mock:
+            await live.send_token_refresh_notification(
+                "需要二维码验证",
+                "token_refresh",
+                verification_url="https://passport.goofish.com/mini_login.htm?verify=true",
+                verification_type="qr_verify",
+            )
+
+        dispatch_mock.assert_awaited_once()
+        self.assertEqual(dispatch_mock.call_args.kwargs["notification_type"], "token_refresh")
+        self.assertIn("需要二维码验证", dispatch_mock.call_args.args[1])
+
     async def test_refresh_token_reuses_session_and_passes_proxy(self):
         fake_response = _FakeTokenRefreshResponse()
         fake_session = _FakeSession(fake_response)
@@ -96,6 +151,51 @@ class XianyuTokenRefreshRequestTest(unittest.IsolatedAsyncioTestCase):
         request = fake_session.post_calls[0]
         self.assertEqual(request["kwargs"]["proxy"], "http://127.0.0.1:8888")
         self.assertEqual(fake_response.json_content_type, None)
+
+    def test_conservative_keepalive_config_defaults_to_three_day_token_refresh(self):
+        self.assertEqual(config.TOKEN_REFRESH_INTERVAL, 259200)
+        self.assertEqual(config.TOKEN_RETRY_INTERVAL, 3600)
+        self.assertEqual(config.SESSION_KEEPALIVE_INTERVAL, 600)
+        self.assertEqual(config.RISK_CONTROL.get("qr_login_grace_minutes"), 30)
+
+    async def test_session_keepalive_cookie_updates_preserve_existing_protected_fields(self):
+        live = XianyuLive.__new__(XianyuLive)
+        live.cookie_id = "session_keepalive_cookie_merge_test"
+        live.cookies = {
+            "unb": "account-1",
+            "sgcookie": "existing_sgcookie",
+            "cookie2": "existing_cookie2",
+            "_m_h5_tk": "existing_token_123",
+            "_m_h5_tk_enc": "existing_token_enc",
+            "t": "existing_t",
+            "cna": "existing_cna",
+        }
+        live.cookies_str = live._serialize_cookies(live.cookies)
+        live.session = None
+        live.myid = "account-1"
+        live.device_id = "device-id"
+
+        persisted = []
+
+        async def fake_update_config_cookies():
+            persisted.append(live.cookies_str)
+
+        live.update_config_cookies = fake_update_config_cookies
+
+        changed = await live._apply_response_cookie_updates(
+            {
+                "Set-Cookie": [
+                    "cookie2=; Path=/; Domain=.goofish.com",
+                    "x5sec=fresh_x5sec; Path=/; Domain=.goofish.com",
+                ]
+            },
+            "session_keepalive",
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(live.cookies["cookie2"], "existing_cookie2")
+        self.assertEqual(live.cookies["x5sec"], "fresh_x5sec")
+        self.assertEqual(len(persisted), 1)
 
     async def test_handle_captcha_verification_marks_slider_scene_as_token_refresh(self):
         created_sliders = []
@@ -172,6 +272,42 @@ class XianyuTokenRefreshRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(len(created_sliders), 1)
         self.assertTrue(created_sliders[0].kwargs.get("use_account_persistent_profile"))
+
+    async def test_password_login_refresh_marks_missing_credentials(self):
+        live = XianyuLive.__new__(XianyuLive)
+        live.cookie_id = "missing_credentials_test"
+        live.cookies_str = "cookie2=old_cookie"
+        live.last_token_refresh_status = None
+        live.last_token_refresh_error_message = None
+        live._safe_str = lambda exc: str(exc)
+        live._normalize_risk_trigger_scene = lambda *_args, **_kwargs: "token_refresh"
+        live._build_risk_event_meta = lambda **kwargs: kwargs
+        live._create_risk_log = lambda **_kwargs: "risk-log-id"
+        live._update_risk_log = mock.Mock()
+        live.is_manual_refresh_active = lambda *_args, **_kwargs: False
+        live._is_account_pause_status = lambda *_args, **_kwargs: False
+        live._should_defer_auth_recovery_for_qr_grace = lambda: False
+        live._get_active_password_login_failure_backoff = lambda *_args, **_kwargs: None
+        live.send_token_refresh_notification = mock.AsyncMock()
+
+        with mock.patch("XianyuAutoAsync.db_manager.mark_stale_risk_control_logs_failed", return_value=0), \
+             mock.patch("XianyuAutoAsync.db_manager.get_cookie_details", return_value={
+                 "cookie_value": "cookie2=old_cookie",
+                 "username": "",
+                 "password": "",
+                 "show_browser": False,
+             }), \
+             mock.patch("XianyuAutoAsync.log_captcha_event"), \
+             mock.patch.object(XianyuLive, "acquire_auth_recovery_lock", return_value=(True, None)), \
+             mock.patch.object(XianyuLive, "release_auth_recovery_lock") as release_lock:
+            result = await live._try_password_login_refresh("令牌/Session过期")
+
+        self.assertFalse(result)
+        self.assertEqual(live.last_token_refresh_status, "missing_credentials")
+        self.assertEqual(live.last_token_refresh_error_message, "未配置用户名或密码，无法自动刷新Cookie")
+        live.send_token_refresh_notification.assert_awaited_once()
+        live._update_risk_log.assert_called()
+        release_lock.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import re
 import aiohttp
 import io
 import base64
+import bcrypt
 from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageDraw, ImageFont
 from typing import List, Tuple, Dict, Optional, Any
@@ -337,6 +338,40 @@ class DBManager:
             ''')
 
             
+            # 创建个人黑名单表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS xy_personal_blacklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cookie_id TEXT,
+                buyer_id TEXT NOT NULL,
+                buyer_nick TEXT DEFAULT '',
+                item_id TEXT,
+                reason TEXT DEFAULT '',
+                is_enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
+            )
+            ''')
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_xy_personal_blacklist_user_buyer ON xy_personal_blacklist(user_id, buyer_id)")
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_xy_personal_blacklist_scope ON xy_personal_blacklist(user_id, buyer_id, cookie_id, item_id, is_enabled)")
+
+            # 创建平台黑名单表（预留平台同步能力）
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS xy_platform_blacklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                buyer_id TEXT NOT NULL,
+                buyer_nick TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            ''')
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_xy_platform_blacklist_user_buyer ON xy_platform_blacklist(user_id, buyer_id)")
+
             # 创建keywords表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS keywords (
@@ -580,35 +615,6 @@ class DBManager:
                 logger.info("正在为 item_info 表添加 multi_quantity_delivery 列...")
                 self._execute_sql(cursor, "ALTER TABLE item_info ADD COLUMN multi_quantity_delivery BOOLEAN DEFAULT FALSE")
                 logger.info("item_info 表 multi_quantity_delivery 列添加完成")
-
-            # 创建商品发布任务表
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS item_publish_tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                account_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                price TEXT DEFAULT '',
-                category_keyword TEXT DEFAULT '',
-                status TEXT DEFAULT 'draft',
-                publish_url TEXT DEFAULT '',
-                images_json TEXT DEFAULT '[]',
-                image_count INTEGER DEFAULT 0,
-                platform_item_id TEXT DEFAULT '',
-                matched_item_ids TEXT DEFAULT '[]',
-                browser_screenshot TEXT DEFAULT '',
-                error_message TEXT DEFAULT '',
-                error_details TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                started_at TEXT DEFAULT '',
-                confirmed_at TEXT DEFAULT '',
-                finished_at TEXT DEFAULT '',
-                FOREIGN KEY (account_id) REFERENCES cookies(id) ON DELETE CASCADE
-            )
-            ''')
 
             # 创建自动发货规则表
             cursor.execute('''
@@ -854,24 +860,6 @@ class DBManager:
             )
             ''')
 
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS account_risk_states (
-                cookie_id TEXT PRIMARY KEY,
-                paused INTEGER DEFAULT 0,
-                pause_reason TEXT DEFAULT '',
-                paused_at REAL,
-                consecutive_failures INTEGER DEFAULT 0,
-                last_failure_at REAL,
-                last_failure_reason TEXT DEFAULT '',
-                last_success_at REAL,
-                last_action_at REAL,
-                next_allowed_at TEXT DEFAULT '{}',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at REAL,
-                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
-            )
-            ''')
-
             # 创建通知模板表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS notification_templates (
@@ -1067,7 +1055,6 @@ Cookie数量: {cookie_count}
             self._ensure_scheduled_red_flower_logs_table(cursor)
             self._ensure_scheduled_task_logs_table(cursor)
             self._ensure_product_publish_tables(cursor)
-            self._ensure_account_risk_states_table(cursor)
 
             # 迁移notification_templates表以支持新的模板类型
             self._migrate_notification_templates(cursor)
@@ -1197,27 +1184,6 @@ Cookie数量: {cookie_count}
         self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_scheduled_red_flower_logs_cookie_time ON scheduled_red_flower_logs(cookie_id, created_at DESC)")
         self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_scheduled_red_flower_logs_batch ON scheduled_red_flower_logs(batch_id)")
         self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_scheduled_red_flower_logs_order ON scheduled_red_flower_logs(order_id)")
-
-    def _ensure_account_risk_states_table(self, cursor):
-        """Persist account-level risk pause and cooldown state."""
-        self._execute_sql(cursor, '''
-        CREATE TABLE IF NOT EXISTS account_risk_states (
-            cookie_id TEXT PRIMARY KEY,
-            paused INTEGER DEFAULT 0,
-            pause_reason TEXT DEFAULT '',
-            paused_at REAL,
-            consecutive_failures INTEGER DEFAULT 0,
-            last_failure_at REAL,
-            last_failure_reason TEXT DEFAULT '',
-            last_success_at REAL,
-            last_action_at REAL,
-            next_allowed_at TEXT DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at REAL,
-            FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
-        )
-        ''')
-        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_account_risk_states_paused ON account_risk_states(paused, updated_at)")
 
     def _ensure_scheduled_task_logs_table(self, cursor):
         """创建通用任务执行日志表。"""
@@ -2477,8 +2443,8 @@ Cookie数量: {cookie_count}
                 logger.error(f"获取账号自动回复暂停时间失败: {e}")
                 return 10
 
-    def update_cookie_account_info(self, cookie_id: str, cookie_value: str = None, username: str = None, password: str = None, show_browser: bool = None, user_id: int = None, remark: str = None) -> bool:
-        """更新Cookie的账号信息（包括cookie值、用户名、密码、备注和显示浏览器设置）
+    def update_cookie_account_info(self, cookie_id: str, cookie_value: str = None, username: str = None, password: str = None, show_browser: bool = None, user_id: int = None) -> bool:
+        """更新Cookie的账号信息（包括cookie值、用户名、密码和显示浏览器设置）
         如果记录不存在，会先创建记录（需要提供cookie_value和user_id）
         """
         with self.lock:
@@ -2521,11 +2487,6 @@ Cookie数量: {cookie_count}
                         insert_fields.append('show_browser')
                         insert_values.append(1 if show_browser else 0)
                         insert_placeholders.append('?')
-
-                    if remark is not None:
-                        insert_fields.append('remark')
-                        insert_values.append(remark)
-                        insert_placeholders.append('?')
                     
                     sql = f"INSERT INTO cookies ({', '.join(insert_fields)}) VALUES ({', '.join(insert_placeholders)})"
                     self._execute_sql(cursor, sql, tuple(insert_values))
@@ -2553,10 +2514,6 @@ Cookie数量: {cookie_count}
                     if show_browser is not None:
                         update_fields.append("show_browser = ?")
                         params.append(1 if show_browser else 0)
-
-                    if remark is not None:
-                        update_fields.append("remark = ?")
-                        params.append(remark)
                     
                     if not update_fields:
                         logger.warning(f"更新账号 {cookie_id} 信息时没有提供任何更新字段")
@@ -4217,12 +4174,31 @@ Cookie数量: {cookie_count}
 
     # ==================== 用户管理方法 ====================
 
+    def hash_password(self, password: str) -> str:
+        """Hash a user password using bcrypt."""
+        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    def verify_password_hash(self, password: str, password_hash: str) -> bool:
+        """Verify bcrypt hashes and legacy sha256 hashes."""
+        if not password_hash:
+            return False
+        password_hash = str(password_hash)
+        if password_hash.startswith(('$2a$', '$2b$', '$2y$')):
+            try:
+                return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+            except Exception as e:
+                logger.warning(f"bcrypt密码验证失败: {e}")
+                return False
+        if re.fullmatch(r'[0-9a-f]{64}', password_hash or ''):
+            return hashlib.sha256(password.encode()).hexdigest() == password_hash
+        return False
+
     def create_user(self, username: str, email: str, password: str) -> bool:
         """创建新用户"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                password_hash = hashlib.sha256(password.encode()).hexdigest()
+                password_hash = self.hash_password(password)
 
                 cursor.execute('''
                 INSERT INTO users (username, email, password_hash)
@@ -4331,15 +4307,17 @@ Cookie数量: {cookie_count}
         if not user:
             return False
 
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
-        return user['password_hash'] == password_hash and user['is_active']
+        if not user['is_active']:
+            return False
+
+        return self.verify_password_hash(password, user['password_hash'])
 
     def update_user_password(self, username: str, new_password: str) -> bool:
         """更新用户密码"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                password_hash = hashlib.sha256(new_password.encode()).hexdigest()
+                password_hash = self.hash_password(new_password)
 
                 cursor.execute('''
                 UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
@@ -4628,18 +4606,11 @@ Cookie数量: {cookie_count}
         try:
             import aiohttp
 
-            # 邮件 API 地址：从系统设置读取，未配置则拒绝调用以避免向未知第三方泄露。
-            # 兼容旧版 email_api_url 配置名，但不再使用硬编码第三方默认服务。
-            api_url = (
-                self.get_system_setting('verification_email_api_url')
-                or self.get_system_setting('email_api_url')
-                or ''
-            ).strip()
+            # 邮件 API 地址：从系统设置读取，未配置则拒绝调用以避免向未知第三方泄露
+            api_url = (self.get_system_setting('verification_email_api_url') or '').strip()
             if not api_url:
-                logger.warning(f"未配置 verification_email_api_url/email_api_url，无法通过 API 渠道发送验证码邮件: {email}")
+                logger.warning(f"未配置 verification_email_api_url，无法通过 API 渠道发送验证码邮件: {email}")
                 return False
-            timeout_seconds = int(self.get_system_setting('email_api_timeout') or 15)
-            verify_ssl = (self.get_system_setting('email_api_verify_ssl') or 'false').lower() == 'true'
             params = {
                 'subject': subject,
                 'receiveUser': email,
@@ -4649,42 +4620,16 @@ Cookie数量: {cookie_count}
             async with aiohttp.ClientSession() as session:
                 try:
                     logger.info(f"使用API发送验证码邮件: {email}")
-                    ssl_param = None if verify_ssl else False
-                    async with session.get(api_url, params=params, timeout=timeout_seconds, ssl=ssl_param) as response:
+                    async with session.get(api_url, params=params, timeout=15) as response:
                         response_text = await response.text()
                         logger.info(f"邮件API响应: {response.status}")
 
-                        # HTTP 状态码不为 200 直接失败
-                        if response.status != 200:
-                            logger.error(
-                                f"API发送验证码邮件失败: {email}, 状态码: {response.status}, 响应: {response_text[:200]}"
-                            )
-                            return False
-
-                        # 兼容不同 API 返回格式：优先解析 JSON 并判断 success/data 字段
-                        success = False
-                        try:
-                            payload = await response.json(content_type=None)
-                            if isinstance(payload, dict):
-                                # 常见：{"success": true} / {"data": "success"} / {"data": true}
-                                if payload.get('success') is True:
-                                    success = True
-                                else:
-                                    data_value = payload.get('data')
-                                    if data_value is True or str(data_value).lower() in {'success', 'ok', 'true', '1'}:
-                                        success = True
-                        except Exception:
-                            # 非 JSON / 解析失败：退化为文本判断
-                            success = str(response_text).strip().lower() in {'ok', 'success', 'true', '1'}
-
-                        if success:
+                        if response.status == 200:
                             logger.info(f"验证码邮件发送成功(API): {email}")
                             return True
-
-                        logger.error(
-                            f"API发送验证码邮件返回失败: {email}, 响应: {response_text[:300]}"
-                        )
-                        return False
+                        else:
+                            logger.error(f"API发送验证码邮件失败: {email}, 状态码: {response.status}, 响应: {response_text[:200]}")
+                            return False
                 except Exception as e:
                     logger.error(f"API邮件发送异常: {email}, 错误: {e}")
                     return False
@@ -9336,87 +9281,6 @@ Cookie数量: {cookie_count}
             logger.error(f"获取风控日志数量失败: {e}")
             return 0
 
-    def get_account_risk_state(self, cookie_id: str) -> Optional[Dict[str, Any]]:
-        """Return persisted risk pause/cooldown state for one account."""
-        try:
-            with self.lock:
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT * FROM account_risk_states WHERE cookie_id = ?", (cookie_id,))
-                row = cursor.fetchone()
-                if not row:
-                    return None
-                columns = [description[0] for description in cursor.description]
-                data = dict(zip(columns, row))
-                try:
-                    data['next_allowed_at'] = json.loads(data.get('next_allowed_at') or '{}')
-                except Exception:
-                    data['next_allowed_at'] = {}
-                return data
-        except Exception as e:
-            logger.error(f"获取账号风控状态失败: {e}")
-            return None
-
-    def upsert_account_risk_state(self, cookie_id: str, **updates) -> bool:
-        """Create or update persisted risk pause/cooldown state."""
-        if not cookie_id:
-            return False
-        allowed_fields = {
-            'paused', 'pause_reason', 'paused_at', 'consecutive_failures',
-            'last_failure_at', 'last_failure_reason', 'last_success_at',
-            'last_action_at', 'next_allowed_at', 'updated_at',
-        }
-        clean_updates = {key: value for key, value in updates.items() if key in allowed_fields}
-        if 'next_allowed_at' in clean_updates and not isinstance(clean_updates['next_allowed_at'], str):
-            clean_updates['next_allowed_at'] = json.dumps(clean_updates['next_allowed_at'] or {}, ensure_ascii=False)
-        clean_updates.setdefault('updated_at', time.time())
-        try:
-            with self.lock:
-                cursor = self.conn.cursor()
-                cursor.execute(
-                    "INSERT OR IGNORE INTO account_risk_states (cookie_id, updated_at) VALUES (?, ?)",
-                    (cookie_id, clean_updates.get('updated_at')),
-                )
-                if clean_updates:
-                    assignments = ', '.join([f"{field} = ?" for field in clean_updates.keys()])
-                    params = list(clean_updates.values()) + [cookie_id]
-                    cursor.execute(f"UPDATE account_risk_states SET {assignments} WHERE cookie_id = ?", params)
-                self.conn.commit()
-                return True
-        except Exception as e:
-            logger.error(f"更新账号风控状态失败: {e}")
-            try:
-                self.conn.rollback()
-            except Exception:
-                pass
-            return False
-
-    def get_account_risk_states(self, cookie_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """Return risk states, optionally scoped to account ids."""
-        try:
-            with self.lock:
-                cursor = self.conn.cursor()
-                query = "SELECT * FROM account_risk_states"
-                params = []
-                if cookie_ids:
-                    placeholders = ','.join(['?'] * len(cookie_ids))
-                    query += f" WHERE cookie_id IN ({placeholders})"
-                    params.extend(cookie_ids)
-                query += " ORDER BY paused DESC, updated_at DESC"
-                cursor.execute(query, params)
-                columns = [description[0] for description in cursor.description]
-                rows = []
-                for row in cursor.fetchall():
-                    data = dict(zip(columns, row))
-                    try:
-                        data['next_allowed_at'] = json.loads(data.get('next_allowed_at') or '{}')
-                    except Exception:
-                        data['next_allowed_at'] = {}
-                    rows.append(data)
-                return rows
-        except Exception as e:
-            logger.error(f"获取账号风控状态列表失败: {e}")
-            return []
-
     def get_slider_verification_session_stats(self, cookie_ids: Optional[List[str]] = None, range_key: str = 'all') -> Dict[str, Any]:
         """获取滑块验证会话级统计数据。"""
         empty_stats = {
@@ -9765,170 +9629,6 @@ Cookie数量: {cookie_count}
         except Exception as e:
             logger.error(f"清理历史数据时出错: {e}")
             return {'error': str(e)}
-
-    # ==================== 商品发布任务管理 ====================
-
-    def create_item_publish_task(
-        self,
-        user_id: int,
-        account_id: str,
-        title: str,
-        description: str = '',
-        price: str = '',
-        category_keyword: str = '',
-        images_json: str = '[]',
-        status: str = 'draft',
-        publish_url: str = ''
-    ) -> Optional[int]:
-        """创建商品发布任务。"""
-        with self.lock:
-            try:
-                normalized_title = str(title or '').strip()
-                if not normalized_title:
-                    raise ValueError('title不能为空')
-
-                normalized_images = images_json if isinstance(images_json, str) else json.dumps(images_json, ensure_ascii=False)
-                try:
-                    parsed_images = json.loads(normalized_images or '[]')
-                    if not isinstance(parsed_images, list):
-                        parsed_images = []
-                except Exception:
-                    parsed_images = []
-                    normalized_images = '[]'
-
-                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                cursor = self.conn.cursor()
-                self._execute_sql(cursor, """
-                    INSERT INTO item_publish_tasks (
-                        user_id, account_id, title, description, price, category_keyword,
-                        status, publish_url, images_json, image_count, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    user_id,
-                    account_id,
-                    normalized_title,
-                    str(description or '').strip(),
-                    str(price or '').strip(),
-                    str(category_keyword or '').strip(),
-                    status or 'draft',
-                    str(publish_url or '').strip(),
-                    normalized_images,
-                    len(parsed_images),
-                    now,
-                    now
-                ))
-                self.conn.commit()
-                task_id = cursor.lastrowid
-                logger.info(f"创建商品发布任务成功: task_id={task_id}, account_id={account_id}")
-                return task_id
-            except Exception as e:
-                logger.error(f"创建商品发布任务失败: {e}")
-                self.conn.rollback()
-                return None
-
-    def _parse_item_publish_task_row(self, cursor, row) -> Dict[str, Any]:
-        columns = [description[0] for description in cursor.description]
-        task = dict(zip(columns, row))
-        for key in ('images_json', 'matched_item_ids'):
-            parsed_key = f'{key}_parsed'
-            try:
-                parsed = json.loads(task.get(key) or '[]')
-                task[parsed_key] = parsed if isinstance(parsed, list) else []
-            except Exception:
-                task[parsed_key] = []
-        task['image_count'] = int(task.get('image_count') or 0)
-        return task
-
-    def get_item_publish_task(self, task_id: int) -> Optional[Dict[str, Any]]:
-        """获取单个商品发布任务。"""
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                self._execute_sql(cursor, "SELECT * FROM item_publish_tasks WHERE id = ?", (task_id,))
-                row = cursor.fetchone()
-                return self._parse_item_publish_task_row(cursor, row) if row else None
-            except Exception as e:
-                logger.error(f"获取商品发布任务失败: {e}")
-                return None
-
-    def get_item_publish_tasks(
-        self,
-        user_id: Optional[int] = None,
-        account_id: Optional[str] = None,
-        status: Optional[str] = None,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """获取商品发布任务列表。"""
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                sql = "SELECT * FROM item_publish_tasks WHERE 1=1"
-                params: List[Any] = []
-                if user_id is not None:
-                    sql += " AND user_id = ?"
-                    params.append(user_id)
-                if account_id:
-                    sql += " AND account_id = ?"
-                    params.append(account_id)
-                if status:
-                    sql += " AND status = ?"
-                    params.append(status)
-                sql += " ORDER BY id DESC LIMIT ?"
-                params.append(max(1, min(int(limit or 100), 500)))
-                self._execute_sql(cursor, sql, tuple(params))
-                return [self._parse_item_publish_task_row(cursor, row) for row in cursor.fetchall()]
-            except Exception as e:
-                logger.error(f"获取商品发布任务列表失败: {e}")
-                return []
-
-    def update_item_publish_task(self, task_id: int, **kwargs) -> bool:
-        """更新商品发布任务。"""
-        allowed_fields = {
-            'user_id', 'account_id', 'title', 'description', 'price',
-            'category_keyword', 'status', 'publish_url', 'images_json',
-            'image_count', 'platform_item_id', 'matched_item_ids',
-            'browser_screenshot', 'error_message', 'error_details',
-            'notes', 'started_at', 'confirmed_at', 'finished_at'
-        }
-        with self.lock:
-            try:
-                update_fields = []
-                params: List[Any] = []
-                for key, value in kwargs.items():
-                    if key not in allowed_fields:
-                        continue
-                    if key in ('images_json', 'matched_item_ids') and value is not None and not isinstance(value, str):
-                        value = json.dumps(value, ensure_ascii=False)
-                    update_fields.append(f"{key} = ?")
-                    params.append(value)
-
-                if not update_fields:
-                    return False
-
-                update_fields.append("updated_at = CURRENT_TIMESTAMP")
-                params.append(task_id)
-                cursor = self.conn.cursor()
-                sql = f"UPDATE item_publish_tasks SET {', '.join(update_fields)} WHERE id = ?"
-                self._execute_sql(cursor, sql, tuple(params))
-                self.conn.commit()
-                return cursor.rowcount > 0
-            except Exception as e:
-                logger.error(f"更新商品发布任务失败: {e}")
-                self.conn.rollback()
-                return False
-
-    def delete_item_publish_task(self, task_id: int) -> bool:
-        """删除商品发布任务。"""
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                self._execute_sql(cursor, "DELETE FROM item_publish_tasks WHERE id = ?", (task_id,))
-                self.conn.commit()
-                return cursor.rowcount > 0
-            except Exception as e:
-                logger.error(f"删除商品发布任务失败: {e}")
-                self.conn.rollback()
-                return False
 
     # ==================== 定时任务管理 ====================
 
@@ -10842,6 +10542,325 @@ Cookie数量: {cookie_count}
             except Exception as e:
                 logger.error(f"获取全量会话列表失败: {e}")
                 return []
+
+    def _normalize_blacklist_scope_value(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _normalize_blacklist_buyer_ids(self, buyer_ids: Any) -> List[str]:
+        if buyer_ids is None:
+            return []
+        if isinstance(buyer_ids, str):
+            raw_values = re.split(r'[\n,，]+', buyer_ids)
+        else:
+            raw_values = list(buyer_ids)
+
+        normalized = []
+        seen = set()
+        for raw_value in raw_values:
+            buyer_id = str(raw_value or '').strip()
+            if not buyer_id or buyer_id in seen:
+                continue
+            normalized.append(buyer_id)
+            seen.add(buyer_id)
+        return normalized
+
+    def _personal_blacklist_row_to_dict(self, row: tuple, columns: List[str]) -> Dict[str, Any]:
+        record = dict(zip(columns, row))
+        record['is_enabled'] = bool(record.get('is_enabled'))
+        scope = 'user'
+        if self._normalize_blacklist_scope_value(record.get('item_id')):
+            scope = 'item'
+        elif self._normalize_blacklist_scope_value(record.get('cookie_id')):
+            scope = 'account'
+        record['scope'] = scope
+        return record
+
+    def create_personal_blacklist(
+        self,
+        user_id: int,
+        buyer_ids: List[str],
+        cookie_id: str = None,
+        item_id: str = None,
+        reason: str = "",
+        is_enabled: bool = True,
+        buyer_nick: str = "",
+    ) -> Dict[str, Any]:
+        """创建个人黑名单记录，重复 scope 会跳过。"""
+        normalized_buyer_ids = self._normalize_blacklist_buyer_ids(buyer_ids)
+        normalized_cookie_id = self._normalize_blacklist_scope_value(cookie_id)
+        normalized_item_id = self._normalize_blacklist_scope_value(item_id)
+        normalized_reason = str(reason or '').strip()
+        normalized_buyer_nick = str(buyer_nick or '').strip()
+
+        result = {
+            'created': 0,
+            'skipped': 0,
+            'records': [],
+            'skipped_buyer_ids': [],
+        }
+        if not user_id or not normalized_buyer_ids:
+            return result
+
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                if normalized_cookie_id:
+                    self._execute_sql(cursor, "SELECT user_id FROM cookies WHERE id = ?", (normalized_cookie_id,))
+                    cookie_owner = cursor.fetchone()
+                    if not cookie_owner or int(cookie_owner[0]) != int(user_id):
+                        result['skipped'] = len(normalized_buyer_ids)
+                        result['skipped_buyer_ids'] = normalized_buyer_ids
+                        return result
+
+                for buyer_id in normalized_buyer_ids:
+                    self._execute_sql(cursor, """
+                        SELECT id FROM xy_personal_blacklist
+                        WHERE user_id = ?
+                          AND buyer_id = ?
+                          AND COALESCE(cookie_id, '') = ?
+                          AND COALESCE(item_id, '') = ?
+                        LIMIT 1
+                    """, (
+                        user_id,
+                        buyer_id,
+                        normalized_cookie_id or '',
+                        normalized_item_id or '',
+                    ))
+                    if cursor.fetchone():
+                        result['skipped'] += 1
+                        result['skipped_buyer_ids'].append(buyer_id)
+                        continue
+
+                    self._execute_sql(cursor, """
+                        INSERT INTO xy_personal_blacklist
+                            (user_id, cookie_id, buyer_id, buyer_nick, item_id, reason, is_enabled, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (
+                        user_id,
+                        normalized_cookie_id,
+                        buyer_id,
+                        normalized_buyer_nick,
+                        normalized_item_id,
+                        normalized_reason,
+                        1 if is_enabled else 0,
+                    ))
+                    record_id = cursor.lastrowid
+                    self._execute_sql(cursor, """
+                        SELECT * FROM xy_personal_blacklist WHERE id = ?
+                    """, (record_id,))
+                    columns = [desc[0] for desc in cursor.description]
+                    row = cursor.fetchone()
+                    if row:
+                        result['records'].append(self._personal_blacklist_row_to_dict(row, columns))
+                    result['created'] += 1
+
+                self.conn.commit()
+                return result
+            except Exception as e:
+                self.conn.rollback()
+                logger.error(f"创建个人黑名单失败: {e}")
+                return result
+
+    def list_personal_blacklist(
+        self,
+        user_id: int,
+        buyer_id: str = None,
+        buyer_nick: str = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
+        """分页查询个人黑名单。"""
+        safe_page = max(int(page or 1), 1)
+        safe_page_size = min(max(int(page_size or 20), 1), 200)
+        offset = (safe_page - 1) * safe_page_size
+        where_clauses = ["user_id = ?"]
+        params: List[Any] = [user_id]
+
+        normalized_buyer_id = self._normalize_blacklist_scope_value(buyer_id)
+        if normalized_buyer_id:
+            where_clauses.append("buyer_id LIKE ?")
+            params.append(f"%{normalized_buyer_id}%")
+
+        normalized_buyer_nick = self._normalize_blacklist_scope_value(buyer_nick)
+        if normalized_buyer_nick:
+            where_clauses.append("buyer_nick LIKE ?")
+            params.append(f"%{normalized_buyer_nick}%")
+
+        where_sql = " AND ".join(where_clauses)
+
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                self._execute_sql(cursor, f"SELECT COUNT(*) FROM xy_personal_blacklist WHERE {where_sql}", tuple(params))
+                total = int(cursor.fetchone()[0] or 0)
+
+                self._execute_sql(cursor, f"""
+                    SELECT * FROM xy_personal_blacklist
+                    WHERE {where_sql}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ? OFFSET ?
+                """, tuple(params + [safe_page_size, offset]))
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                data = [self._personal_blacklist_row_to_dict(row, columns) for row in rows]
+                return {
+                    'data': data,
+                    'total': total,
+                    'page': safe_page,
+                    'page_size': safe_page_size,
+                }
+            except Exception as e:
+                logger.error(f"查询个人黑名单失败: {e}")
+                return {'data': [], 'total': 0, 'page': safe_page, 'page_size': safe_page_size}
+
+    def delete_personal_blacklist(self, record_id: int, user_id: int) -> bool:
+        """删除单条个人黑名单。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                self._execute_sql(cursor, "DELETE FROM xy_personal_blacklist WHERE id = ? AND user_id = ?", (record_id, user_id))
+                deleted = cursor.rowcount > 0
+                self.conn.commit()
+                return deleted
+            except Exception as e:
+                self.conn.rollback()
+                logger.error(f"删除个人黑名单失败: {e}")
+                return False
+
+    def batch_delete_personal_blacklist(self, ids: List[int], user_id: int) -> int:
+        """批量删除个人黑名单，返回删除数量。"""
+        safe_ids = []
+        for raw_id in ids or []:
+            try:
+                record_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if record_id > 0 and record_id not in safe_ids:
+                safe_ids.append(record_id)
+
+        if not safe_ids:
+            return 0
+
+        placeholders = ','.join(['?'] * len(safe_ids))
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                self._execute_sql(
+                    cursor,
+                    f"DELETE FROM xy_personal_blacklist WHERE user_id = ? AND id IN ({placeholders})",
+                    tuple([user_id] + safe_ids),
+                )
+                deleted = cursor.rowcount
+                self.conn.commit()
+                return deleted
+            except Exception as e:
+                self.conn.rollback()
+                logger.error(f"批量删除个人黑名单失败: {e}")
+                return 0
+
+    def toggle_personal_blacklist(self, record_id: int, user_id: int, is_enabled: bool) -> bool:
+        """启用或禁用个人黑名单。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                self._execute_sql(cursor, """
+                    UPDATE xy_personal_blacklist
+                    SET is_enabled = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND user_id = ?
+                """, (1 if is_enabled else 0, record_id, user_id))
+                updated = cursor.rowcount > 0
+                self.conn.commit()
+                return updated
+            except Exception as e:
+                self.conn.rollback()
+                logger.error(f"更新个人黑名单状态失败: {e}")
+                return False
+
+    def is_buyer_blacklisted(
+        self,
+        user_id: int,
+        buyer_id: str,
+        cookie_id: str = None,
+        item_id: str = None,
+    ) -> Optional[Dict[str, Any]]:
+        """按商品级 > 账号级 > 用户级匹配个人黑名单。"""
+        normalized_buyer_id = self._normalize_blacklist_scope_value(buyer_id)
+        if not user_id or not normalized_buyer_id:
+            return None
+
+        normalized_cookie_id = self._normalize_blacklist_scope_value(cookie_id)
+        normalized_item_id = self._normalize_blacklist_scope_value(item_id)
+
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                self._execute_sql(cursor, """
+                    SELECT * FROM xy_personal_blacklist
+                    WHERE user_id = ?
+                      AND buyer_id = ?
+                      AND is_enabled = 1
+                      AND (
+                        (COALESCE(cookie_id, '') = '' AND COALESCE(item_id, '') = '')
+                        OR (COALESCE(cookie_id, '') = ? AND COALESCE(item_id, '') = '')
+                        OR (COALESCE(item_id, '') = ? AND (COALESCE(cookie_id, '') = '' OR COALESCE(cookie_id, '') = ?))
+                      )
+                    ORDER BY
+                      CASE
+                        WHEN COALESCE(item_id, '') != '' THEN 3
+                        WHEN COALESCE(cookie_id, '') != '' THEN 2
+                        ELSE 1
+                      END DESC,
+                      updated_at DESC,
+                      id DESC
+                    LIMIT 1
+                """, (
+                    user_id,
+                    normalized_buyer_id,
+                    normalized_cookie_id or '',
+                    normalized_item_id or '',
+                    normalized_cookie_id or '',
+                ))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                columns = [desc[0] for desc in cursor.description]
+                return self._personal_blacklist_row_to_dict(row, columns)
+            except Exception as e:
+                logger.error(f"匹配个人黑名单失败: {e}")
+                return None
+
+    def list_platform_blacklist(self, user_id: int, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        """分页查询平台黑名单（当前仅预留展示）。"""
+        safe_page = max(int(page or 1), 1)
+        safe_page_size = min(max(int(page_size or 20), 1), 200)
+        offset = (safe_page - 1) * safe_page_size
+
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                self._execute_sql(cursor, "SELECT COUNT(*) FROM xy_platform_blacklist WHERE user_id = ?", (user_id,))
+                total = int(cursor.fetchone()[0] or 0)
+                self._execute_sql(cursor, """
+                    SELECT id, user_id, buyer_id, buyer_nick, created_at, updated_at
+                    FROM xy_platform_blacklist
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ? OFFSET ?
+                """, (user_id, safe_page_size, offset))
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                return {
+                    'data': [dict(zip(columns, row)) for row in rows],
+                    'total': total,
+                    'page': safe_page,
+                    'page_size': safe_page_size,
+                }
+            except Exception as e:
+                logger.error(f"查询平台黑名单失败: {e}")
+                return {'data': [], 'total': 0, 'page': safe_page, 'page_size': safe_page_size}
 
 
 # 全局单例

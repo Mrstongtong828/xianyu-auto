@@ -295,7 +295,7 @@ class SliderVerificationGuardsTest(unittest.TestCase):
         }
         slider = self._make_slider(page)
         slider.last_login_error = ""
-        slider._snapshot_context_cookies = lambda _context, page=None: dict(cookies_missing_cna)
+        slider._snapshot_context_cookies = lambda *_args, **_kwargs: dict(cookies_missing_cna)
         slider._stabilize_logged_in_context_cookies = lambda _context, _page, scene=None: dict(cookies_missing_cna)
         def _warmup(_context, _page, scene=None, initial_cookies=None):
             slider.last_browser_cookie_warmup_session_unready = True
@@ -349,7 +349,7 @@ class SliderVerificationGuardsTest(unittest.TestCase):
             "distance": 258,
             "final_left_px": 258,
         }
-        slider._snapshot_context_cookies = lambda: {}
+        slider._snapshot_context_cookies = lambda *_args, **_kwargs: {}
         slider._harden_password_slider_runtime = lambda *_args, **_kwargs: None
         slider.calculate_slide_distance = lambda *_args, **_kwargs: 258
         slider.generate_human_trajectory = lambda distance, attempt=1: [(distance, 0, 0)]
@@ -412,7 +412,7 @@ class SliderVerificationGuardsTest(unittest.TestCase):
             "distance": 258,
             "final_left_px": 258,
         }
-        slider._snapshot_context_cookies = lambda: {}
+        slider._snapshot_context_cookies = lambda *_args, **_kwargs: {}
         slider._harden_password_slider_runtime = lambda *_args, **_kwargs: None
         slider.calculate_slide_distance = lambda *_args, **_kwargs: 258
         slider.generate_human_trajectory = lambda distance, attempt=1: [(distance, 0, 0)]

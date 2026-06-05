@@ -35,9 +35,6 @@ STATIC_ASSET_EXTENSIONS = {
 # 前端源码目录下允许热更新的源码类型
 FRONTEND_SOURCE_DIRS = {'static', 'frontend'}
 FRONTEND_SOURCE_EXTENSIONS = {'.ts', '.tsx', '.jsx', '.vue'}
-CONFIG_ASSET_FILES = {
-    Path('config/item_publish_selectors.json'),
-}
 
 # 不需要重启的文件扩展名
 NO_RESTART_EXTENSIONS = (
@@ -134,9 +131,6 @@ def is_updatable_file(relative_path: Path) -> bool:
     """判断文件是否应纳入热更新清单"""
     if is_excluded_path(relative_path):
         return False
-
-    if relative_path in CONFIG_ASSET_FILES:
-        return True
 
     suffix = relative_path.suffix.lower()
     if suffix == '.py':

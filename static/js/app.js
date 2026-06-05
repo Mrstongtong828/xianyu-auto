@@ -62,6 +62,12 @@ let orderHistorySyncPollingTimer = null;
 let activeOrderHistorySyncJobId = '';
 let orderHistorySyncNotifiedJobId = '';
 let orderHistorySyncAccounts = [];
+let blacklistState = {
+    page: 1,
+    pageSize: 20,
+    total: 0,
+    accountsLoaded: false
+};
 let loadingRequestCount = 0;
 let loadingShowTimer = null;
 const LOADING_SHOW_DELAY = 120;
@@ -110,9 +116,6 @@ function showSection(sectionName) {
         break;
     case 'accounts':         // 【账号管理菜单】
         loadCookies();
-        break;
-    case 'backgrounds':      // 【后台管理菜单】
-        loadBackgroundManager();
         break;
     case 'item-publish':    // 【商品发布菜单】
         loadItemPublish();
@@ -174,6 +177,9 @@ function showSection(sectionName) {
         break;
     case 'online-im':        // 【在线客服菜单】
         loadOnlineIm();
+        break;
+    case 'blacklist':        // 【黑名单管理菜单】
+        loadBlacklistPage();
         break;
     case 'data-management':  // 【数据管理菜单】
         loadDataManagement();
@@ -1255,12 +1261,12 @@ async function loadSalesSummary() {
     const weekSalesEl = document.getElementById('dashboardWeekSales');
     const monthSalesEl = document.getElementById('dashboardMonthSales');
     const updateTimeEl = document.getElementById('dashboardSalesUpdateTime');
-
+    
     // 显示加载状态
     showSalesLoadingState(todaySalesEl);
     showSalesLoadingState(weekSalesEl);
     showSalesLoadingState(monthSalesEl);
-
+    
     try {
         const token = localStorage.getItem('auth_token');
         const response = await fetch('/api/sales/summary', {
@@ -1283,7 +1289,7 @@ async function loadSalesSummary() {
         showSalesErrorState(weekSalesEl, '加载失败');
         showSalesErrorState(monthSalesEl, '加载失败');
     }
-
+    
     // 启动定时刷新（每5分钟刷新一次）
     startSalesSummaryRefreshTimer();
 }
@@ -1340,7 +1346,7 @@ function startSalesSummaryRefreshTimer() {
     if (salesSummaryRefreshTimer) {
         clearInterval(salesSummaryRefreshTimer);
     }
-
+    
     // 每5分钟刷新一次
     salesSummaryRefreshTimer = setInterval(async () => {
         try {
@@ -1349,7 +1355,7 @@ function startSalesSummaryRefreshTimer() {
                 clearInterval(salesSummaryRefreshTimer);
                 return;
             }
-
+            
             const response = await fetch('/api/sales/summary', {
                 headers: {
                     'Authorization': `Bearer ${token}`
@@ -1383,7 +1389,7 @@ let salesDateRangeOutsideClickBound = false;
 function showChartLoading() {
     const chartContainer = document.querySelector('.chart-container');
     if (!chartContainer) return;
-
+    
     // 添加加载遮罩
     let loadingOverlay = chartContainer.querySelector('.chart-loading-overlay');
     if (!loadingOverlay) {
@@ -1428,7 +1434,7 @@ async function loadSalesChart(period) {
     showChartLoading();
     updateChartButtonState(period);
     setDateRangePickerVisible(false);
-
+    
     try {
         const token = localStorage.getItem('auth_token');
         let startDate, endDate;
@@ -1566,7 +1572,7 @@ function toggleDateRangePicker() {
 // 渲染销售额图表
 function renderSalesChart(salesData, period) {
     const ctx = document.getElementById('salesChart').getContext('2d');
-
+    
     // 准备数据
     const labels = salesData.map(item => item.date);
     const data = salesData.map(item => item.amount);
@@ -1583,10 +1589,10 @@ function renderSalesChart(salesData, period) {
         salesChartInstance.data.labels = labels;
         salesChartInstance.data.datasets[0].data = data;
         salesChartInstance.data.datasets[0].backgroundColor = gradient;
-
+        
         // 更新标题
         salesChartInstance.options.plugins.title.text = getChartTitle(period);
-
+        
         // 平滑过渡更新
         salesChartInstance.update('active');
         return;
@@ -2513,7 +2519,7 @@ async function addKeyword() {
         .split(/[\|\n]/)
         .map(k => k.trim())
         .filter(k => k.length > 0);
-
+    
     if (keywords.length === 0) {
         showToast('请填写有效的关键词', 'warning');
         toggleLoading(false);
@@ -2524,7 +2530,7 @@ async function addKeyword() {
     let itemIds = selectedOptions
         .map(opt => opt.value)
         .filter(id => id !== ''); // 过滤掉空值（通用关键词选项）
-
+    
     // 如果没有选中任何商品，或者选中了空值，则作为通用关键词
     if (itemIds.length === 0) {
         itemIds = [''];
@@ -2709,7 +2715,7 @@ function renderKeywordsList(keywords) {
 
     // 按回复内容和类型分组
     const groups = groupKeywordsByReply(keywords);
-
+    
     console.log(`开始渲染 ${groups.length} 个分组，共 ${keywords.length} 个关键词`);
 
     groups.forEach((group, groupIndex) => {
@@ -2764,11 +2770,11 @@ function renderKeywordsList(keywords) {
         // 商品列表
         const itemsList = group.items.map((itemInfo, itemIndex) => {
             const itemName = getItemName(itemInfo.item_id, itemInfo.item_title);
-            const displayText = itemInfo.item_id ?
-                `${itemInfo.item_id} - ${itemName}` :
+            const displayText = itemInfo.item_id ? 
+                `${itemInfo.item_id} - ${itemName}` : 
                 '通用关键词（所有商品）';
             const icon = itemInfo.item_id ? 'bi-box' : 'bi-globe';
-
+            
             return `
                 <span class="item-chip">
                     <i class="bi ${icon}"></i>
@@ -2803,7 +2809,7 @@ function renderKeywordsList(keywords) {
                 </div>
         </div>
     `;
-
+        
         container.appendChild(groupItem);
     });
 
@@ -2813,11 +2819,11 @@ function renderKeywordsList(keywords) {
 // 按回复内容分组关键词
 function groupKeywordsByReply(keywords) {
     const groupMap = new Map();
-
+    
     keywords.forEach((item, index) => {
         // 使用回复内容+类型+图片URL作为分组键
         const key = `${item.type || 'text'}:${item.reply || ''}:${item.image_url || ''}`;
-
+        
         if (!groupMap.has(key)) {
             groupMap.set(key, {
                 id: `group_${groupMap.size}`,
@@ -2829,14 +2835,14 @@ function groupKeywordsByReply(keywords) {
                 indices: [] // 保存原始索引
             });
         }
-
+        
         const group = groupMap.get(key);
-
+        
         // 添加关键词（去重）
         if (!group.keywords.includes(item.keyword)) {
             group.keywords.push(item.keyword);
         }
-
+        
         // 添加商品（去重）
         const itemId = item.item_id || '';
         const existingItem = group.items.find(i => (i.item_id || '') === itemId);
@@ -2849,25 +2855,25 @@ function groupKeywordsByReply(keywords) {
         } else {
             existingItem.indices.push(index);
         }
-
+        
         // 记录原始索引
         group.indices.push(index);
     });
-
+    
     return Array.from(groupMap.values());
 }
 
 // 获取商品名称（截取前30个字符）
 function getItemName(itemId, itemTitle) {
     if (!itemId) return '';
-
+    
     // 优先使用传入的商品名称
     if (itemTitle && itemTitle.trim()) {
         const name = itemTitle.trim();
         // 截取前30个字符
         return name.length > 30 ? name.substring(0, 30) + '...' : name;
     }
-
+    
     // 从商品列表中查找商品名称
     const itemsSelect = document.getElementById('newItemIdSelect');
     if (itemsSelect) {
@@ -2882,7 +2888,7 @@ function getItemName(itemId, itemTitle) {
             }
         }
     }
-
+    
     return '未知商品';
 }
 
@@ -3123,34 +3129,34 @@ async function deleteSpecificKeyword(groupId, keywordIndex) {
     const keywords = keywordsData[currentCookieId] || [];
     const groups = groupKeywordsByReply(keywords);
     const group = groups.find(g => g.id === groupId);
-
+    
     if (!group) {
         showToast('找不到关键词分组', 'warning');
         return;
     }
-
+    
     const targetKeyword = group.keywords[keywordIndex];
     if (!confirm(`确定要删除关键词 "${targetKeyword}" 在所有商品中的配置吗？`)) {
         return;
     }
-
+    
     try {
         toggleLoading(true);
-
+        
         // 找到所有需要删除的索引（从后往前删除，避免索引变化）
         const indicesToDelete = [];
         keywords.forEach((item, index) => {
-            if (item.keyword === targetKeyword &&
+            if (item.keyword === targetKeyword && 
                 (item.type || 'text') === group.type &&
                 (item.reply || '') === group.reply &&
                 (item.image_url || '') === group.image_url) {
                 indicesToDelete.push(index);
             }
         });
-
+        
         // 从后往前删除
         indicesToDelete.sort((a, b) => b - a);
-
+        
         for (const index of indicesToDelete) {
             const response = await fetch(`${apiBase}/keywords/${currentCookieId}/${index}`, {
                 method: 'DELETE',
@@ -3158,15 +3164,15 @@ async function deleteSpecificKeyword(groupId, keywordIndex) {
                     'Authorization': `Bearer ${authToken}`
                 }
             });
-
+            
             if (!response.ok) {
                 throw new Error('删除失败');
             }
         }
-
+        
         showToast(`✅ 关键词 "${targetKeyword}" 已删除（${indicesToDelete.length}条配置）`, 'success');
         await refreshKeywordsList();
-
+        
     } catch (error) {
         console.error('删除关键词失败:', error);
         showToast('删除关键词失败', 'danger');
@@ -3180,23 +3186,23 @@ async function deleteSpecificItem(groupId, itemIndex) {
     const keywords = keywordsData[currentCookieId] || [];
     const groups = groupKeywordsByReply(keywords);
     const group = groups.find(g => g.id === groupId);
-
+    
     if (!group) {
         showToast('找不到关键词分组', 'warning');
         return;
     }
-
+    
     const targetItem = group.items[itemIndex];
     const itemId = targetItem.item_id || '';
     const itemName = itemId ? `商品 ${itemId} - ${getItemName(itemId, targetItem.item_title)}` : '通用关键词（所有商品）';
-
+    
     if (!confirm(`确定要删除 "${itemName}" 的所有关键词配置吗？\n将删除该商品下的 ${group.keywords.length} 个关键词。`)) {
         return;
     }
-
+    
     try {
         toggleLoading(true);
-
+        
         // 找到所有需要删除的索引
         const indicesToDelete = [];
         keywords.forEach((item, index) => {
@@ -3207,10 +3213,10 @@ async function deleteSpecificItem(groupId, itemIndex) {
                 indicesToDelete.push(index);
             }
         });
-
+        
         // 从后往前删除
         indicesToDelete.sort((a, b) => b - a);
-
+        
         for (const index of indicesToDelete) {
             const response = await fetch(`${apiBase}/keywords/${currentCookieId}/${index}`, {
                 method: 'DELETE',
@@ -3218,15 +3224,15 @@ async function deleteSpecificItem(groupId, itemIndex) {
                     'Authorization': `Bearer ${authToken}`
                 }
             });
-
+            
             if (!response.ok) {
                 throw new Error('删除失败');
             }
         }
-
+        
         showToast(`✅ ${itemName} 的配置已删除（${indicesToDelete.length}条）`, 'success');
         await refreshKeywordsList();
-
+        
     } catch (error) {
         console.error('删除商品配置失败:', error);
         showToast('删除商品配置失败', 'danger');
@@ -3281,9 +3287,9 @@ function showToast(message, type = 'success') {
     if (type === 'error') {
         type = 'danger';
     }
-
+    
     let toastContainer = document.querySelector('.toast-container');
-
+    
     // 如果 toast 容器不存在，创建一个
     if (!toastContainer) {
         toastContainer = document.createElement('div');
@@ -3291,7 +3297,7 @@ function showToast(message, type = 'success') {
         toastContainer.style.zIndex = '9999';
         document.body.appendChild(toastContainer);
     }
-
+    
     const toast = document.createElement('div');
     toast.className = `toast align-items-center text-white bg-${type} border-0`;
     toast.setAttribute('role', 'alert');
@@ -3379,8 +3385,397 @@ async function fetchJSON(url, opts = {}) {
 }
 
 // ================================
-// 账号保活诊断
+// 【黑名单管理菜单】相关功能
 // ================================
+
+async function loadBlacklistPage() {
+    await loadBlacklistAccountOptions();
+    await loadPersonalBlacklist(blacklistState.page || 1);
+}
+
+async function loadBlacklistAccountOptions(force = false) {
+    const accountSelect = document.getElementById('blacklistCookieId');
+    if (!accountSelect) return;
+    if (blacklistState.accountsLoaded && !force) return;
+
+    try {
+        const currentValue = accountSelect.value;
+        const accounts = await fetchJSON(`${apiBase}/cookies/details`);
+        const safeAccounts = Array.isArray(accounts) ? accounts : [];
+        accountSelect.innerHTML = '<option value="">全部账号</option>' + safeAccounts.map(account => {
+            const accountId = String(account.id || '').trim();
+            const remark = String(account.remark || '').trim();
+            const label = remark ? `${accountId}（${remark}）` : accountId;
+            return `<option value="${escapeHtml(accountId)}">${escapeHtml(label)}</option>`;
+        }).join('');
+        if (currentValue && safeAccounts.some(account => String(account.id || '') === currentValue)) {
+            accountSelect.value = currentValue;
+        }
+        blacklistState.accountsLoaded = true;
+    } catch (error) {
+        console.error('加载黑名单账号选项失败:', error);
+    }
+}
+
+function handleBlacklistFilterKeydown(event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        loadPersonalBlacklist(1);
+    }
+}
+
+async function loadPersonalBlacklist(page = 1) {
+    const tableBody = document.getElementById('blacklistTableBody');
+    if (!tableBody) return;
+
+    const pageSizeSelect = document.getElementById('blacklistPageSize');
+    const pageSize = Math.max(1, parseInt(pageSizeSelect?.value || '20', 10) || 20);
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const params = new URLSearchParams({
+        page: String(safePage),
+        page_size: String(pageSize)
+    });
+
+    const buyerId = document.getElementById('blacklistFilterBuyerId')?.value?.trim();
+    const buyerNick = document.getElementById('blacklistFilterBuyerNick')?.value?.trim();
+    if (buyerId) params.set('buyer_id', buyerId);
+    if (buyerNick) params.set('buyer_nick', buyerNick);
+
+    try {
+        const result = await fetchJSON(`${apiBase}/api/blacklist/personal?${params.toString()}`);
+        const records = Array.isArray(result?.data) ? result.data : [];
+        blacklistState.page = Number(result?.page || safePage);
+        blacklistState.pageSize = Number(result?.page_size || pageSize);
+        blacklistState.total = Number(result?.total || 0);
+        renderPersonalBlacklist(records);
+        renderBlacklistPagination();
+    } catch (error) {
+        console.error('加载个人黑名单失败:', error);
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="8" class="text-center py-4 text-danger">
+                    <i class="bi bi-exclamation-triangle fs-1 d-block mb-3"></i>
+                    加载黑名单失败
+                </td>
+            </tr>
+        `;
+    }
+}
+
+function getBlacklistScopeBadge(scope) {
+    const normalizedScope = String(scope || 'user');
+    const config = {
+        item: { text: '商品级', cls: 'bg-warning text-dark' },
+        account: { text: '账号级', cls: 'bg-info text-dark' },
+        user: { text: '用户级', cls: 'bg-secondary' }
+    }[normalizedScope] || { text: normalizedScope || '未知', cls: 'bg-secondary' };
+    return `<span class="badge ${config.cls}">${escapeHtml(config.text)}</span>`;
+}
+
+function getBlacklistTargetHtml(record) {
+    const cookieId = String(record?.cookie_id || '').trim();
+    const itemId = String(record?.item_id || '').trim();
+    const parts = [];
+    parts.push(cookieId ? `账号 ${cookieId}` : '全部账号');
+    if (itemId) parts.push(`商品 ${itemId}`);
+    return parts.map(part => `<div class="small text-muted text-nowrap" title="${escapeHtml(part)}">${escapeHtml(part)}</div>`).join('');
+}
+
+function renderPersonalBlacklist(records) {
+    const tableBody = document.getElementById('blacklistTableBody');
+    const totalText = document.getElementById('blacklistTotalText');
+    const selectAll = document.getElementById('blacklistSelectAll');
+    if (!tableBody) return;
+
+    if (totalText) {
+        totalText.textContent = `共 ${blacklistState.total || 0} 条`;
+    }
+    if (selectAll) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+    }
+
+    if (!Array.isArray(records) || records.length === 0) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="8" class="text-center py-4 text-muted">
+                    <i class="bi bi-person-x fs-1 d-block mb-3"></i>
+                    暂无黑名单记录
+                </td>
+            </tr>
+        `;
+        updateBlacklistBatchDeleteState();
+        return;
+    }
+
+    tableBody.innerHTML = records.map(record => {
+        const recordId = Number(record.id || 0);
+        const buyerId = String(record.buyer_id || '').trim();
+        const buyerNick = String(record.buyer_nick || '').trim();
+        const reason = String(record.reason || '').trim();
+        const enabled = Boolean(record.is_enabled);
+        const createdAt = formatDateTime(record.created_at || record.updated_at || '');
+        return `
+            <tr>
+                <td>
+                    <input class="form-check-input blacklist-row-check" type="checkbox" data-id="${recordId}" onchange="updateBlacklistBatchDeleteState()">
+                </td>
+                <td>${getBlacklistScopeBadge(record.scope)}</td>
+                <td>
+                    <div class="fw-semibold" title="${escapeHtml(buyerId)}">${escapeHtml(buyerId)}</div>
+                    ${buyerNick ? `<div class="small text-muted" title="${escapeHtml(buyerNick)}">${escapeHtml(buyerNick)}</div>` : ''}
+                </td>
+                <td>${getBlacklistTargetHtml(record)}</td>
+                <td style="max-width: 220px;">
+                    <span class="d-inline-block text-truncate" style="max-width: 100%;" title="${escapeHtml(reason)}">${escapeHtml(reason || '-')}</span>
+                </td>
+                <td>
+                    <div class="form-check form-switch m-0" title="${enabled ? '点击禁用' : '点击启用'}">
+                        <input class="form-check-input" type="checkbox" ${enabled ? 'checked' : ''} onchange="togglePersonalBlacklist(${recordId}, this.checked)">
+                    </div>
+                </td>
+                <td><small class="text-muted text-nowrap">${escapeHtml(createdAt)}</small></td>
+                <td>
+                    <button type="button" class="btn btn-outline-danger btn-sm" onclick="deletePersonalBlacklist(${recordId})" title="删除">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>
+        `;
+    }).join('');
+    updateBlacklistBatchDeleteState();
+}
+
+function renderBlacklistPagination() {
+    const pagination = document.getElementById('blacklistPagination');
+    const pageText = document.getElementById('blacklistPageText');
+    if (!pagination) return;
+
+    const pageSize = Math.max(1, Number(blacklistState.pageSize || 20));
+    const total = Math.max(0, Number(blacklistState.total || 0));
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const currentPage = Math.min(Math.max(1, Number(blacklistState.page || 1)), totalPages);
+
+    if (currentPage !== blacklistState.page && total > 0) {
+        loadPersonalBlacklist(currentPage);
+        return;
+    }
+
+    if (pageText) {
+        pageText.textContent = `第 ${currentPage} / ${totalPages} 页`;
+    }
+
+    const startPage = Math.max(1, currentPage - 2);
+    const endPage = Math.min(totalPages, startPage + 4);
+    const buttons = [];
+    const addButton = (label, targetPage, disabled = false, active = false, title = '') => {
+        buttons.push(`
+            <button type="button" class="btn btn-sm ${active ? 'btn-primary' : 'btn-outline-secondary'}" ${disabled ? 'disabled' : ''} onclick="loadPersonalBlacklist(${targetPage})" title="${escapeHtml(title || label)}">
+                ${label}
+            </button>
+        `);
+    };
+
+    addButton('<i class="bi bi-chevron-left"></i>', currentPage - 1, currentPage <= 1, false, '上一页');
+    for (let page = startPage; page <= endPage; page += 1) {
+        addButton(String(page), page, false, page === currentPage);
+    }
+    addButton('<i class="bi bi-chevron-right"></i>', currentPage + 1, currentPage >= totalPages, false, '下一页');
+    pagination.innerHTML = buttons.join('');
+}
+
+async function createPersonalBlacklist() {
+    const buyerIds = document.getElementById('blacklistBuyerIds')?.value?.trim() || '';
+    if (!buyerIds) {
+        showToast('请填写买家ID', 'warning');
+        return;
+    }
+
+    const payload = {
+        buyer_ids: buyerIds,
+        cookie_id: document.getElementById('blacklistCookieId')?.value?.trim() || null,
+        item_id: document.getElementById('blacklistItemId')?.value?.trim() || null,
+        buyer_nick: document.getElementById('blacklistBuyerNick')?.value?.trim() || '',
+        reason: document.getElementById('blacklistReason')?.value?.trim() || '',
+        is_enabled: Boolean(document.getElementById('blacklistEnabled')?.checked)
+    };
+
+    try {
+        const result = await fetchJSON(`${apiBase}/api/blacklist/personal`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        showToast(result?.message || '黑名单已保存', 'success');
+        resetPersonalBlacklistForm();
+        await loadPersonalBlacklist(1);
+    } catch (error) {
+        console.error('新增个人黑名单失败:', error);
+    }
+}
+
+function resetPersonalBlacklistForm() {
+    const form = document.getElementById('personalBlacklistForm');
+    if (form) form.reset();
+    const enabled = document.getElementById('blacklistEnabled');
+    if (enabled) enabled.checked = true;
+}
+
+async function togglePersonalBlacklist(recordId, isEnabled) {
+    try {
+        await fetchJSON(`${apiBase}/api/blacklist/personal/${recordId}/toggle`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_enabled: Boolean(isEnabled) })
+        });
+        showToast(isEnabled ? '黑名单已启用' : '黑名单已禁用', 'success');
+    } catch (error) {
+        console.error('更新黑名单状态失败:', error);
+        await loadPersonalBlacklist(blacklistState.page || 1);
+    }
+}
+
+async function deletePersonalBlacklist(recordId) {
+    if (!confirm('确定删除这条黑名单记录吗？')) return;
+    try {
+        const result = await fetchJSON(`${apiBase}/api/blacklist/personal/${recordId}`, {
+            method: 'DELETE'
+        });
+        showToast(result?.message || '黑名单已删除', 'success');
+        await loadPersonalBlacklist(blacklistState.page || 1);
+    } catch (error) {
+        console.error('删除个人黑名单失败:', error);
+    }
+}
+
+function getSelectedBlacklistIds() {
+    return Array.from(document.querySelectorAll('.blacklist-row-check:checked'))
+        .map(checkbox => parseInt(checkbox.dataset.id || '0', 10))
+        .filter(id => id > 0);
+}
+
+function toggleBlacklistSelectAll(checked) {
+    document.querySelectorAll('.blacklist-row-check').forEach(checkbox => {
+        checkbox.checked = Boolean(checked);
+    });
+    updateBlacklistBatchDeleteState();
+}
+
+function updateBlacklistBatchDeleteState() {
+    const selectedIds = getSelectedBlacklistIds();
+    const batchButton = document.getElementById('blacklistBatchDeleteBtn');
+    const selectAll = document.getElementById('blacklistSelectAll');
+    const rowChecks = Array.from(document.querySelectorAll('.blacklist-row-check'));
+
+    if (batchButton) {
+        batchButton.disabled = selectedIds.length === 0;
+        batchButton.innerHTML = selectedIds.length > 0
+            ? `<i class="bi bi-trash me-1"></i>批量删除 (${selectedIds.length})`
+            : '<i class="bi bi-trash me-1"></i>批量删除';
+    }
+
+    if (selectAll) {
+        selectAll.checked = rowChecks.length > 0 && selectedIds.length === rowChecks.length;
+        selectAll.indeterminate = selectedIds.length > 0 && selectedIds.length < rowChecks.length;
+    }
+}
+
+async function batchDeletePersonalBlacklist() {
+    const selectedIds = getSelectedBlacklistIds();
+    if (selectedIds.length === 0) {
+        showToast('请先选择要删除的黑名单', 'warning');
+        return;
+    }
+    if (!confirm(`确定删除选中的 ${selectedIds.length} 条黑名单记录吗？`)) return;
+
+    try {
+        const result = await fetchJSON(`${apiBase}/api/blacklist/personal/batch-delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: selectedIds })
+        });
+        showToast(result?.message || '批量删除完成', 'success');
+        await loadPersonalBlacklist(blacklistState.page || 1);
+    } catch (error) {
+        console.error('批量删除个人黑名单失败:', error);
+    }
+}
+
+function resetBlacklistFilters() {
+    const buyerId = document.getElementById('blacklistFilterBuyerId');
+    const buyerNick = document.getElementById('blacklistFilterBuyerNick');
+    if (buyerId) buyerId.value = '';
+    if (buyerNick) buyerNick.value = '';
+    loadPersonalBlacklist(1);
+}
+
+async function exportPersonalBlacklist() {
+    toggleLoading(true);
+    try {
+        const response = await fetch(`${apiBase}/api/blacklist/personal/export`, {
+            headers: { 'Authorization': `Bearer ${getAuthToken()}` }
+        });
+        if (response.status === 401) {
+            localStorage.removeItem('auth_token');
+            window.location.href = '/';
+            return;
+        }
+        if (!response.ok) {
+            let message = `导出失败: HTTP ${response.status}`;
+            try {
+                const errorText = await response.text();
+                if (errorText) message = errorText;
+            } catch {}
+            throw new Error(message);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+        const filename = filenameMatch ? filenameMatch[1] : `personal_blacklist_${Date.now()}.xlsx`;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        showToast('黑名单已导出', 'success');
+    } catch (error) {
+        console.error('导出个人黑名单失败:', error);
+        showToast(error.message || '导出个人黑名单失败', 'danger');
+    } finally {
+        toggleLoading(false);
+    }
+}
+
+async function importPersonalBlacklistFile() {
+    const input = document.getElementById('blacklistImportFile');
+    const file = input?.files?.[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+        showToast('仅支持 .xlsx 文件', 'warning');
+        input.value = '';
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+        const result = await fetchJSON(`${apiBase}/api/blacklist/personal/import`, {
+            method: 'POST',
+            body: formData
+        });
+        showToast(result?.message || '黑名单导入完成', 'success');
+        await loadPersonalBlacklist(1);
+    } catch (error) {
+        console.error('导入个人黑名单失败:', error);
+    } finally {
+        input.value = '';
+    }
+}
+
+
 
 function getAboutDiagnosticsElements() {
     return {
@@ -4085,114 +4480,6 @@ function initAboutDiagnosticsEvents() {
 }
 
 // ================================
-// 【后台管理菜单】相关功能
-// ================================
-
-function renderBackgroundStatusBadge(account) {
-    if (account.running) {
-        return '<span class="badge bg-success"><i class="bi bi-play-fill me-1"></i>运行中</span>';
-    }
-    if (account.enabled) {
-        return '<span class="badge bg-warning text-dark"><i class="bi bi-pause-fill me-1"></i>已启用未运行</span>';
-    }
-    return '<span class="badge bg-secondary"><i class="bi bi-stop-fill me-1"></i>已停止</span>';
-}
-
-function renderBackgroundConnection(account) {
-    const runtime = account.runtime_status || {};
-    if (!account.running) {
-        return '<span class="text-muted">未运行</span>';
-    }
-
-    const ready = runtime.ws_ready || runtime.message_stream_ready;
-    const state = runtime.connection_state || 'unknown';
-    const badge = ready ? 'bg-success' : 'bg-info';
-    return `<span class="badge ${badge}">${escapeHtml(state)}</span>`;
-}
-
-async function loadBackgroundManager() {
-    const tbody = document.getElementById('backgroundAccountsTableBody');
-    if (!tbody) return;
-
-    try {
-        const data = await fetchJSON(`${apiBase}/backgrounds`);
-        const accounts = data.accounts || [];
-        document.getElementById('backgroundActiveAccount').textContent = data.active_cookie_id || '未启动';
-        document.getElementById('backgroundRunningCount').textContent = `${data.running_count || 0} / ${data.max_running || 1}`;
-        document.getElementById('backgroundLimit').textContent = `最多 ${data.max_running || 1} 个后台`;
-
-        if (accounts.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">暂无账号</td></tr>';
-            return;
-        }
-
-        tbody.innerHTML = accounts.map(account => {
-            const remark = account.remark || account.username || '';
-            const actionButton = account.running
-                ? '<button class="btn btn-sm btn-outline-secondary" disabled><i class="bi bi-check2-circle me-1"></i>当前后台</button>'
-                : `<button class="btn btn-sm btn-primary" onclick="activateBackground('${account.id}')"><i class="bi bi-play-circle me-1"></i>设为后台</button>`;
-
-            return `
-                <tr>
-                    <td><strong class="text-primary">${escapeHtml(account.id)}</strong></td>
-                    <td>${remark ? escapeHtml(remark) : '<span class="text-muted">-</span>'}</td>
-                    <td>${renderBackgroundStatusBadge(account)}</td>
-                    <td>${renderBackgroundConnection(account)}</td>
-                    <td class="text-end">${actionButton}</td>
-                </tr>
-            `;
-        }).join('');
-    } catch (error) {
-        console.error('加载后台管理失败:', error);
-        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">加载失败：${escapeHtml(error.message || '未知错误')}</td></tr>`;
-    }
-}
-
-async function activateBackground(accountId) {
-    if (!accountId) return;
-
-    try {
-        toggleLoading(true);
-        const result = await fetchJSON(`${apiBase}/backgrounds/${encodeURIComponent(accountId)}/activate`, {
-            method: 'POST'
-        });
-        showToast(result.message || `已启动账号 "${accountId}" 后台`, 'success');
-        await loadBackgroundManager();
-        if (document.getElementById('accounts-section')?.classList.contains('active')) {
-            await loadCookies();
-        }
-    } catch (error) {
-        console.error('启动后台失败:', error);
-        showToast(`启动后台失败: ${error.message || '未知错误'}`, 'danger');
-    } finally {
-        toggleLoading(false);
-    }
-}
-
-async function stopAllBackgrounds() {
-    if (!confirm('确定要停止全部账号后台吗？停止后将不会自动接收消息，直到重新选择一个后台账号。')) {
-        return;
-    }
-
-    try {
-        toggleLoading(true);
-        const result = await fetchJSON(`${apiBase}/backgrounds/stop-all`, {
-            method: 'POST'
-        });
-        showToast(result.message || '已停止全部账号后台', 'success');
-        await loadBackgroundManager();
-        if (document.getElementById('accounts-section')?.classList.contains('active')) {
-            await loadCookies();
-        }
-    } catch (error) {
-        console.error('停止后台失败:', error);
-        showToast(`停止后台失败: ${error.message || '未知错误'}`, 'danger');
-    } finally {
-        toggleLoading(false);
-    }
-}
-
-// ================================
 // 【账号管理菜单】相关功能
 // ================================
 
@@ -4292,11 +4579,9 @@ async function loadCookies() {
 
         // 自动确认发货状态（默认开启）
         const autoConfirm = cookie.auto_confirm === undefined ? true : cookie.auto_confirm;
-
+        
         // 自动好评状态（默认关闭）
         const autoComment = cookie.auto_comment === undefined ? false : cookie.auto_comment;
-        const autoCookieRefresh = cookie.auto_cookie_refresh === undefined ? true : cookie.auto_cookie_refresh;
-        const credentialTitle = cookie.username && cookie.has_password ? `已配置账密: ${cookie.username}` : '配置账密';
 
         // 自动求小红花状态（默认关闭）
         const autoRedFlower = cookie.auto_red_flower === undefined ? false : cookie.auto_red_flower;
@@ -4363,9 +4648,9 @@ async function loadCookies() {
             </div>
         </td>
         <td class="align-middle">
-            <div class="remark-cell" data-cookie-id="${encodeURIComponent(cookie.id)}">
-                <span class="remark-display" onclick="editRemark(decodeURIComponent('${encodeURIComponent(cookie.id)}'), decodeURIComponent('${encodeURIComponent(cookie.remark || '')}'))" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
-                    ${cookie.remark ? escapeHtml(cookie.remark) : '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
+            <div class="remark-cell" data-cookie-id="${cookie.id}">
+                <span class="remark-display" onclick="editRemark('${cookie.id}', '${(cookie.remark || '').replace(/'/g, '&#39;')}')" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
+                    ${cookie.remark || '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
                 </span>
             </div>
         </td>
@@ -4415,15 +4700,6 @@ async function loadCookies() {
                 </button>
                 <button class="btn btn-sm btn-outline-danger account-action-btn" onclick="runAutoRedFlowerForAccount('${cookie.id}')" title="立即执行求小红花" data-red-flower-run="${cookie.id}" data-red-flower-active="${autoRedFlower ? 'true' : 'false'}" ${(!isEnabled || !autoRedFlower) ? 'disabled' : ''}>
                     <i class="bi bi-send-fill"></i><span class="action-text">执行</span>
-                </button>
-            </div>
-            <div class="account-action-group account-action-group-login" aria-label="登录维护">
-                <span class="account-action-group-label">登录</span>
-                <button class="btn btn-sm ${cookie.username && cookie.has_password ? 'btn-outline-success' : 'btn-outline-info'} account-action-btn" onclick="openCredentialConfigForAccount('${cookie.id}')" title="${credentialTitle}" data-action="credential-config">
-                    <i class="bi bi-person-gear"></i><span class="action-text">账密</span>
-                </button>
-                <button class="btn btn-sm ${autoCookieRefresh ? 'btn-outline-success' : 'btn-outline-secondary'} account-action-btn" onclick="toggleAutoCookieRefresh('${cookie.id}', ${autoCookieRefresh ? 'false' : 'true'})" title="${autoCookieRefresh ? '关闭自动刷新 Cookie' : '开启自动刷新 Cookie'}" data-action="auto-cookie-refresh">
-                    <i class="bi bi-${autoCookieRefresh ? 'arrow-repeat' : 'pause-circle'}"></i><span class="action-text">${autoCookieRefresh ? '刷新' : '暂停'}</span>
                 </button>
             </div>
             <div class="account-action-group account-action-group-danger" aria-label="危险操作">
@@ -4684,10 +4960,10 @@ async function delCookie(id) {
 async function editCookieInline(id, currentValue) {
     try {
         toggleLoading(true);
-
+        
         // 获取账号详细信息
         const details = await fetchJSON(apiBase + `/cookie/${id}/details?include_secrets=true`);
-
+        
         // 打开编辑模态框
         openAccountEditModal(details);
     } catch (err) {
@@ -4704,13 +4980,12 @@ async function openAccountEditModal(accountData) {
     document.getElementById('accountEditId').value = accountData.id;
     document.getElementById('editAccountCookie').value = accountData.value || '';
     document.getElementById('editAccountUsername').value = accountData.username || '';
-    document.getElementById('editAccountRemark').value = accountData.remark || '';
     document.getElementById('editAccountPassword').value = accountData.password || '';
     document.getElementById('editAccountShowBrowser').checked = accountData.show_browser || false;
-
+    
     // 显示账号ID
     document.getElementById('accountEditIdDisplay').textContent = accountData.id;
-
+    
     // 加载代理配置
     try {
         const proxyData = await fetchJSON(apiBase + `/cookie/${accountData.id}/proxy?include_secret=true`);
@@ -4736,11 +5011,11 @@ async function openAccountEditModal(accountData) {
         document.getElementById('editProxyType').value = 'none';
         toggleProxyFields();
     }
-
+    
     // 打开模态框
     const modal = new bootstrap.Modal(document.getElementById('accountEditModal'));
     modal.show();
-
+    
     // 初始化模态框中的 tooltips
     setTimeout(() => {
         initTooltips();
@@ -4751,7 +5026,7 @@ async function openAccountEditModal(accountData) {
 function toggleProxyFields() {
     const proxyType = document.getElementById('editProxyType').value;
     const showProxy = proxyType !== 'none';
-
+    
     document.getElementById('proxyHostGroup').style.display = showProxy ? 'block' : 'none';
     document.getElementById('proxyPortGroup').style.display = showProxy ? 'block' : 'none';
     document.getElementById('proxyAuthGroup').style.display = showProxy ? 'flex' : 'none';
@@ -4762,22 +5037,21 @@ async function saveAccountEdit() {
     const id = document.getElementById('accountEditId').value;
     const cookie = document.getElementById('editAccountCookie').value.trim();
     const username = document.getElementById('editAccountUsername').value.trim();
-    const remark = document.getElementById('editAccountRemark').value.trim();
     const password = document.getElementById('editAccountPassword').value.trim();
     const showBrowser = document.getElementById('editAccountShowBrowser').checked;
-
+    
     // 代理配置
     const proxyType = document.getElementById('editProxyType').value;
     const proxyHost = document.getElementById('editProxyHost').value.trim();
     const proxyPort = parseInt(document.getElementById('editProxyPort').value) || 0;
     const proxyUser = document.getElementById('editProxyUser').value.trim();
     const proxyPass = document.getElementById('editProxyPass').value.trim();
-
+    
     if (!cookie) {
         showToast('Cookie值不能为空', 'warning');
         return;
     }
-
+    
     // 如果选择了代理，验证必要字段
     if (proxyType !== 'none') {
         if (!proxyHost) {
@@ -4789,10 +5063,10 @@ async function saveAccountEdit() {
             return;
         }
     }
-
+    
     try {
         toggleLoading(true);
-
+        
         // 保存账号基本信息
         await fetchJSON(apiBase + `/cookie/${id}/account-info`, {
             method: 'POST',
@@ -4801,11 +5075,10 @@ async function saveAccountEdit() {
                 value: cookie,
                 username: username,
                 password: password,
-                remark: remark,
                 show_browser: showBrowser
             })
         });
-
+        
         // 保存代理配置
         await fetchJSON(apiBase + `/cookie/${id}/proxy`, {
             method: 'POST',
@@ -4818,13 +5091,13 @@ async function saveAccountEdit() {
                 proxy_pass: proxyPass
             })
         });
-
+        
         showToast(`账号 "${id}" 信息已更新`, 'success');
-
+        
         // 关闭模态框
         const modal = bootstrap.Modal.getInstance(document.getElementById('accountEditModal'));
         modal.hide();
-
+        
         // 重新加载账号列表
         loadCookies();
     } catch (err) {
@@ -4923,9 +5196,6 @@ async function toggleAccountStatus(accountId, enabled) {
 
         // 刷新自动回复页面的账号列表
         refreshAccountList();
-        if (document.getElementById('backgrounds-section')?.classList.contains('active')) {
-            await loadBackgroundManager();
-        }
         if (dashboardData.accounts.length) {
             await refreshDashboardRuntimeSnapshots();
         }
@@ -5294,24 +5564,24 @@ let currentCommentTemplateAccountId = null;
 // 显示好评模板管理弹窗
 async function showCommentTemplates(accountId) {
     currentCommentTemplateAccountId = accountId;
-
+    
     try {
         toggleLoading(true);
-
+        
         // 获取好评模板列表
         const response = await fetch(`${apiBase}/cookies/${accountId}/comment-templates`, {
             headers: {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         if (!response.ok) {
             throw new Error('获取好评模板列表失败');
         }
-
+        
         const data = await response.json();
         const templates = data.templates || [];
-
+        
         // 生成模板列表HTML
         let templatesHtml = '';
         if (templates.length === 0) {
@@ -5338,7 +5608,7 @@ async function showCommentTemplates(accountId) {
                 </div>
             `).join('');
         }
-
+        
         // 显示模态框
         const modalHtml = `
             <div class="modal fade" id="commentTemplatesModal" tabindex="-1" aria-labelledby="commentTemplatesModalLabel" aria-hidden="true">
@@ -5406,7 +5676,7 @@ async function showCommentTemplates(accountId) {
                 </div>
             </div>
         `;
-
+        
         // 检查模态框是否已存在
         const existingModalEl = document.getElementById('commentTemplatesModal');
         if (existingModalEl) {
@@ -5424,15 +5694,15 @@ async function showCommentTemplates(accountId) {
             // 模态框不存在，创建新的
             // 先清理可能残留的遮罩层
             document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
-
+            
             // 添加新模态框
             document.body.insertAdjacentHTML('beforeend', modalHtml);
-
+            
             // 显示模态框
             const modal = new bootstrap.Modal(document.getElementById('commentTemplatesModal'));
             modal.show();
         }
-
+        
     } catch (error) {
         console.error('获取好评模板失败:', error);
         showToast('获取好评模板失败: ' + error.message, 'error');
@@ -5460,7 +5730,7 @@ async function addCommentTemplate() {
     const name = document.getElementById('newTemplateName').value.trim();
     const content = document.getElementById('newTemplateContent').value.trim();
     const isActive = document.getElementById('newTemplateActive').checked;
-
+    
     if (!name) {
         showToast('请输入模板名称', 'warning');
         return;
@@ -5469,10 +5739,10 @@ async function addCommentTemplate() {
         showToast('请输入好评内容', 'warning');
         return;
     }
-
+    
     try {
         toggleLoading(true);
-
+        
         const response = await fetch(`${apiBase}/cookies/${currentCommentTemplateAccountId}/comment-templates`, {
             method: 'POST',
             headers: {
@@ -5485,7 +5755,7 @@ async function addCommentTemplate() {
                 is_active: isActive
             })
         });
-
+        
         if (response.ok) {
             showToast('添加好评模板成功', 'success');
             toggleLoading(false);
@@ -5522,7 +5792,7 @@ async function saveEditCommentTemplate() {
     const templateId = document.getElementById('editTemplateId').value;
     const name = document.getElementById('editTemplateName').value.trim();
     const content = document.getElementById('editTemplateContent').value.trim();
-
+    
     if (!name) {
         showToast('请输入模板名称', 'warning');
         return;
@@ -5531,10 +5801,10 @@ async function saveEditCommentTemplate() {
         showToast('请输入好评内容', 'warning');
         return;
     }
-
+    
     try {
         toggleLoading(true);
-
+        
         const response = await fetch(`${apiBase}/cookies/${currentCommentTemplateAccountId}/comment-templates/${templateId}`, {
             method: 'PUT',
             headers: {
@@ -5546,7 +5816,7 @@ async function saveEditCommentTemplate() {
                 content: content
             })
         });
-
+        
         if (response.ok) {
             showToast('更新好评模板成功', 'success');
             toggleLoading(false);
@@ -5569,17 +5839,17 @@ async function deleteCommentTemplate(accountId, templateId) {
     if (!confirm('确定要删除此好评模板吗？')) {
         return;
     }
-
+    
     try {
         toggleLoading(true);
-
+        
         const response = await fetch(`${apiBase}/cookies/${accountId}/comment-templates/${templateId}`, {
             method: 'DELETE',
             headers: {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         if (response.ok) {
             showToast('删除好评模板成功', 'success');
             toggleLoading(false);
@@ -5601,14 +5871,14 @@ async function deleteCommentTemplate(accountId, templateId) {
 async function activateCommentTemplate(accountId, templateId) {
     try {
         toggleLoading(true);
-
+        
         const response = await fetch(`${apiBase}/cookies/${accountId}/comment-templates/${templateId}/activate`, {
             method: 'PUT',
             headers: {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         if (response.ok) {
             showToast('已切换使用此模板', 'success');
             toggleLoading(false);
@@ -5660,7 +5930,7 @@ function goToAutoReply(accountId) {
 async function logout() {
     // 停止销售额摘要定时刷新
     stopSalesSummaryRefreshTimer();
-
+    
     try {
     if (authToken) {
         await fetch('/logout', {
@@ -7988,7 +8258,7 @@ function toggleCardTypeFields() {
 function toggleApiParamsHelp() {
     const apiMethodElement = document.getElementById('apiMethod');
     if (!apiMethodElement) return;
-
+    
     const apiMethod = apiMethodElement.value;
     const postParamsHelp = document.getElementById('postParamsHelp');
 
@@ -8503,7 +8773,7 @@ async function saveCard() {
 
     // 获取"生成对应发货规则"开关状态
     const generateDeliveryRule = document.getElementById('generateDeliveryRule').checked;
-
+    
     const response = await fetch(`${apiBase}/cards`, {
         method: 'POST',
         headers: {
@@ -9441,6 +9711,7 @@ const DEFAULT_MENU_ITEMS = [
     { id: 'notification-channels', name: '通知渠道', icon: 'bi-bell', required: false },
     { id: 'message-notifications', name: '消息通知', icon: 'bi-chat-dots', required: false },
     { id: 'online-im', name: '在线客服', icon: 'bi-headset', required: false },
+    { id: 'blacklist', name: '黑名单管理', icon: 'bi-person-x', required: false },
     { id: 'system-settings', name: '系统设置', icon: 'bi-gear', required: true },
     { id: 'about', name: '关于', icon: 'bi-info-circle', required: true }
 ];
@@ -9683,41 +9954,56 @@ function applyMenuSettings() {
     if (!sidebar) return;
 
     const sortedItems = getSortedMenuItems();
+    const groupOrder = ['overview', 'operations', 'fulfillment', 'communication', 'security', 'system'];
 
-    // 按顺序重新排列侧边栏菜单（普通菜单项使用 0-99）
+    sidebar.querySelectorAll('.nav-group').forEach((group, index) => {
+        group.style.order = index;
+        group.style.display = '';
+    });
+
+    // 按设置控制显示状态；分类容器保持固定，组内菜单仍按用户保存顺序排列。
     sortedItems.forEach((item, index) => {
         const menuItem = sidebar.querySelector(`.nav-item[data-menu-id="${item.id}"]`);
         if (menuItem) {
-            // 设置显示/隐藏
+            menuItem.style.display = '';
             if (!item.required) {
                 const isVisible = menuSettings[item.id] !== false;
                 menuItem.style.display = isVisible ? '' : 'none';
             }
 
-            // 设置顺序（通过CSS order属性）
             menuItem.style.order = index;
         }
     });
 
-    // 确保管理员菜单区块在普通菜单之后（order: 100）
+    // 如果某个分类内没有可见菜单项，连同分类标题一起隐藏。
+    sidebar.querySelectorAll('.nav-group').forEach(group => {
+        const visibleItems = Array.from(group.querySelectorAll('.nav-item[data-menu-id]'))
+            .some(menuItem => menuItem.style.display !== 'none');
+        group.style.display = visibleItems ? '' : 'none';
+    });
+
+    groupOrder.forEach((groupName, index) => {
+        const group = sidebar.querySelector(`.nav-group[data-menu-group="${groupName}"]`);
+        if (group) {
+            group.style.order = index;
+        }
+    });
+
+    // 确保管理员菜单区块在普通分类之后。
     const adminSection = document.getElementById('adminMenuSection');
     if (adminSection) {
         adminSection.style.order = 100;
     }
 
-    // 底部分隔符和登出按钮在最后（order: 200+）
-    const dividers = sidebar.querySelectorAll('.nav-divider');
-    dividers.forEach((divider, idx) => {
-        // 跳过管理员区块内的分隔符
-        if (!divider.closest('#adminMenuSection')) {
-            divider.style.order = 200 + idx;
-        }
-    });
+    const footerDivider = sidebar.querySelector('[data-sidebar-footer="true"]');
+    if (footerDivider) {
+        footerDivider.style.order = 200;
+    }
 
-    // 登出按钮（没有data-menu-id的nav-item）在最后
+    // 登出按钮（没有data-menu-id的nav-item）在最后。
     const logoutItem = sidebar.querySelector('.nav-item:not([data-menu-id])');
     if (logoutItem) {
-        logoutItem.style.order = 999;
+        logoutItem.style.order = 201;
     }
 }
 
@@ -10970,9 +11256,6 @@ async function submitItemPublishForm() {
         renderItemPublishResult(responseData, true);
         showToast(responseData.message || '商品发布成功', 'success');
         await loadItemPublishLogs();
-        if (typeof refreshItemsData === 'function' && document.getElementById('itemCookieFilter')) {
-            await refreshItemsData();
-        }
     } catch (error) {
         console.error('发布商品失败:', error);
         const errorMessage = error.message || '发布商品失败';
@@ -11257,91 +11540,12 @@ function getItemDetailText(itemDetail) {
     }
 }
 
-function normalizeItemPurchaseUrl(rawUrl, itemId = '') {
-    const fallbackUrl = itemId ? `https://www.goofish.com/item?id=${encodeURIComponent(itemId)}` : '';
-    if (!rawUrl || typeof rawUrl !== 'string') return fallbackUrl;
-
-    let url = rawUrl.trim();
-    if (!url) return fallbackUrl;
-
-    if (/^fleamarket:\/\//i.test(url)) {
-        url = url.replace(/^fleamarket:\/\//i, 'https://www.goofish.com/');
-    } else if (url.startsWith('//')) {
-        url = `https:${url}`;
-    } else if (/^http:\/\//i.test(url)) {
-        url = url.replace(/^http:\/\//i, 'https://');
-    }
-
-    try {
-        const parsedUrl = new URL(url);
-        const hostname = parsedUrl.hostname.toLowerCase();
-        const isAllowedHost = hostname.endsWith('goofish.com') ||
-            hostname.endsWith('idlefish.com') ||
-            hostname.endsWith('taobao.com');
-        return isAllowedHost ? parsedUrl.href : fallbackUrl;
-    } catch (e) {
-        return fallbackUrl;
-    }
-}
-
-function getItemPurchaseUrl(item) {
-    if (!item) return '';
-
-    const itemId = String(item.item_id || item.id || '').trim();
-    const candidates = [
-        item.item_url,
-        item.url,
-        item.detail_url
-    ];
-
-    if (item.item_detail_parsed && typeof item.item_detail_parsed === 'object') {
-        candidates.push(
-            item.item_detail_parsed.detail_url,
-            item.item_detail_parsed.detailUrl,
-            item.item_detail_parsed.item_url,
-            item.item_detail_parsed.url
-        );
-    }
-
-    if (item.item_detail) {
-        try {
-            const detail = JSON.parse(item.item_detail);
-            candidates.push(
-                detail.detail_url,
-                detail.detailUrl,
-                detail.item_url,
-                detail.url
-            );
-        } catch (e) {
-            // 详情不是JSON时，按商品ID生成购买链接即可。
-        }
-    }
-
-    for (const candidate of candidates) {
-        const normalizedUrl = normalizeItemPurchaseUrl(candidate, itemId);
-        if (normalizedUrl) return normalizedUrl;
-    }
-
-    return itemId ? `https://www.goofish.com/item?id=${encodeURIComponent(itemId)}` : '';
-}
-
-function getItemPurchaseUrlLabel(url) {
-    if (!url) return '';
-
-    try {
-        const parsedUrl = new URL(url);
-        return `${parsedUrl.hostname}${parsedUrl.pathname}${parsedUrl.search}`;
-    } catch (e) {
-        return url;
-    }
-}
-
 // 显示当前页的商品数据
 function displayCurrentPageItems() {
     const tbody = document.getElementById('itemsTableBody');
 
     if (!filteredItemsData || filteredItemsData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">暂无商品数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">暂无商品数据</td></tr>';
         resetItemsSelection();
         return;
     }
@@ -11377,14 +11581,6 @@ function displayCurrentPageItems() {
             '<span class="badge bg-success">已开启</span>' :
             '<span class="badge bg-secondary">已关闭</span>';
 
-        const purchaseUrl = getItemPurchaseUrl(item);
-        const purchaseUrlLabel = getItemPurchaseUrlLabel(purchaseUrl);
-        const purchaseLinkDisplay = purchaseUrl ?
-            `<a class="item-purchase-link text-truncate" href="${escapeHtml(purchaseUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(purchaseUrl)}">
-                <i class="bi bi-box-arrow-up-right me-1"></i>${escapeHtml(purchaseUrlLabel)}
-            </a>` :
-            '<span class="text-muted small">无链接</span>';
-
         return `
             <tr>
             <td>
@@ -11398,7 +11594,6 @@ function displayCurrentPageItems() {
             <td title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</td>
             <td title="${escapeHtml(getItemDetailText(item.item_detail || ''))}">${escapeHtml(itemDetailDisplay)}</td>
             <td>${escapeHtml(item.item_price || '未设置')}</td>
-            <td>${purchaseLinkDisplay}</td>
             <td>${multiSpecDisplay}</td>
             <td>${multiQuantityDeliveryDisplay}</td>
             <td>${formatDateTime(item.updated_at)}</td>
@@ -11563,7 +11758,7 @@ let itemsSearchInitialized = false; // 标记是否已初始化
 function initItemsSearch() {
     // 避免重复初始化
     if (itemsSearchInitialized) return;
-
+    
     // 初始化分页大小
     const pageSizeSelect = document.getElementById('itemsPageSize');
     if (pageSizeSelect) {
@@ -11582,7 +11777,7 @@ function initItemsSearch() {
                 filterItems();
             }, 300); // 300ms 防抖延迟
         });
-
+        
         // 标记已初始化
         itemsSearchInitialized = true;
         console.log('商品搜索功能已初始化');
@@ -12850,11 +13045,15 @@ function toggleManualInput() {
     const manualForm = document.getElementById('manualInputForm');
     const passwordForm = document.getElementById('passwordLoginForm');
     const refreshForm = document.getElementById('refreshCookieForm');
-    const credentialForm = document.getElementById('credentialConfigForm');
     if (manualForm.style.display === 'none') {
-        if (passwordForm) passwordForm.style.display = 'none';
-        if (refreshForm) refreshForm.style.display = 'none';
-        if (credentialForm) credentialForm.style.display = 'none';
+        // 隐藏账号密码登录表单
+        if (passwordForm) {
+            passwordForm.style.display = 'none';
+        }
+        // 隐藏刷新Cookie表单
+        if (refreshForm) {
+            refreshForm.style.display = 'none';
+        }
         manualForm.style.display = 'block';
         // 清空表单
         document.getElementById('addForm').reset();
@@ -13068,12 +13267,16 @@ function togglePasswordLogin() {
     const passwordForm = document.getElementById('passwordLoginForm');
     const manualForm = document.getElementById('manualInputForm');
     const refreshForm = document.getElementById('refreshCookieForm');
-    const credentialForm = document.getElementById('credentialConfigForm');
     if (passwordForm.style.display === 'none') {
-        if (manualForm) manualForm.style.display = 'none';
-        if (refreshForm) refreshForm.style.display = 'none';
-        if (credentialForm) credentialForm.style.display = 'none';
-        resetManualCookieImportForm();
+        // 隐藏手动输入表单
+        if (manualForm) {
+            manualForm.style.display = 'none';
+            resetManualCookieImportForm();
+        }
+        // 隐藏刷新Cookie表单
+        if (refreshForm) {
+            refreshForm.style.display = 'none';
+        }
         passwordForm.style.display = 'block';
         // 清空表单
         document.getElementById('passwordLoginFormElement').reset();
@@ -13087,14 +13290,16 @@ function toggleRefreshCookieForm() {
     const refreshForm = document.getElementById('refreshCookieForm');
     const manualForm = document.getElementById('manualInputForm');
     const passwordForm = document.getElementById('passwordLoginForm');
-    const credentialForm = document.getElementById('credentialConfigForm');
 
     if (refreshForm.style.display === 'none') {
         // 隐藏其他表单
-        if (manualForm) manualForm.style.display = 'none';
-        if (passwordForm) passwordForm.style.display = 'none';
-        if (credentialForm) credentialForm.style.display = 'none';
-        resetManualCookieImportForm();
+        if (manualForm) {
+            manualForm.style.display = 'none';
+            resetManualCookieImportForm();
+        }
+        if (passwordForm) {
+            passwordForm.style.display = 'none';
+        }
         refreshForm.style.display = 'block';
         // 清空表单
         document.getElementById('refreshCookieFormElement').reset();
@@ -13104,238 +13309,6 @@ function toggleRefreshCookieForm() {
     } else {
         refreshForm.style.display = 'none';
     }
-}
-
-// 切换账密配置表单显示/隐藏
-function toggleCredentialConfigForm(selectedAccountId = '') {
-    const credentialForm = document.getElementById('credentialConfigForm');
-    const manualForm = document.getElementById('manualInputForm');
-    const passwordForm = document.getElementById('passwordLoginForm');
-    const refreshForm = document.getElementById('refreshCookieForm');
-
-    if (!credentialForm) return;
-
-    if (credentialForm.style.display === 'none' || selectedAccountId) {
-        if (manualForm) manualForm.style.display = 'none';
-        if (passwordForm) passwordForm.style.display = 'none';
-        if (refreshForm) refreshForm.style.display = 'none';
-        credentialForm.style.display = 'block';
-        document.getElementById('credentialConfigFormElement').reset();
-        document.getElementById('credentialConfigAutoRefresh').checked = true;
-        loadCredentialConfigAccountList(selectedAccountId);
-    } else {
-        credentialForm.style.display = 'none';
-    }
-}
-
-async function loadCredentialConfigAccountList(selectedAccountId = '') {
-    const select = document.getElementById('credentialConfigAccountSelect');
-    if (!select) return;
-
-    select.innerHTML = '<option value="">请选择账号...</option>';
-
-    try {
-        const response = await fetch(`${apiBase}/cookies/details`, {
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        });
-        const data = await response.json();
-
-        if (data && data.length > 0) {
-            data.forEach(cookie => {
-                const option = document.createElement('option');
-                option.value = cookie.id;
-                const hasCredentials = cookie.username && cookie.has_password ? '已配置账密' : '未配置账密';
-                const autoRefreshText = (cookie.auto_cookie_refresh === undefined || cookie.auto_cookie_refresh) ? '自动刷新开' : '自动刷新关';
-                option.textContent = `${cookie.id} (${hasCredentials} / ${autoRefreshText})`;
-                option.dataset.username = cookie.username || '';
-                option.dataset.showBrowser = cookie.show_browser ? 'true' : 'false';
-                option.dataset.autoRefresh = cookie.auto_cookie_refresh === undefined || cookie.auto_cookie_refresh ? 'true' : 'false';
-                select.appendChild(option);
-            });
-        }
-
-        if (selectedAccountId) {
-            select.value = selectedAccountId;
-            fillCredentialConfigFromSelectedAccount();
-        }
-    } catch (error) {
-        console.error('加载账密配置账号列表失败:', error);
-        showToast('加载账密配置账号列表失败', 'danger');
-    }
-}
-
-function fillCredentialConfigFromSelectedAccount() {
-    const select = document.getElementById('credentialConfigAccountSelect');
-    if (!select) return;
-    const selectedOption = select.options[select.selectedIndex];
-    document.getElementById('credentialConfigUsername').value = selectedOption?.dataset.username || '';
-    document.getElementById('credentialConfigPassword').value = '';
-    document.getElementById('credentialConfigShowBrowser').checked = selectedOption?.dataset.showBrowser === 'true';
-    document.getElementById('credentialConfigAutoRefresh').checked = selectedOption?.dataset.autoRefresh !== 'false';
-}
-
-function openCredentialConfigForAccount(accountId) {
-    toggleCredentialConfigForm(accountId);
-    document.getElementById('credentialConfigForm')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-function openCredentialConfigFromRefresh() {
-    const select = document.getElementById('refreshCookieAccountSelect');
-    const selectedAccountId = select?.value || '';
-    toggleCredentialConfigForm(selectedAccountId);
-}
-
-async function saveCredentialConfig(event) {
-    event.preventDefault();
-
-    const accountId = document.getElementById('credentialConfigAccountSelect').value;
-    const username = document.getElementById('credentialConfigUsername').value.trim();
-    const password = document.getElementById('credentialConfigPassword').value.trim();
-    const showBrowser = document.getElementById('credentialConfigShowBrowser').checked;
-    const autoRefresh = document.getElementById('credentialConfigAutoRefresh').checked;
-
-    if (!accountId || !username || !password) {
-        showToast('请选择账号并填写完整账密', 'warning');
-        return;
-    }
-
-    try {
-        toggleLoading(true);
-
-        await fetchJSON(`${apiBase}/cookie/${encodeURIComponent(accountId)}/account-info`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                username: username,
-                password: password,
-                show_browser: showBrowser,
-                auto_cookie_refresh: autoRefresh
-            })
-        });
-
-        await refreshCredentialViews(accountId, {
-            username,
-            hasPassword: true,
-            showBrowser,
-            autoCookieRefresh: autoRefresh
-        });
-
-        showToast(`账号 "${accountId}" 账密配置已保存`, 'success');
-    } catch (error) {
-        console.error('保存账密配置失败:', error);
-        showToast(`保存账密配置失败: ${error.message || '未知错误'}`, 'danger');
-    } finally {
-        toggleLoading(false);
-    }
-}
-
-function updateCredentialAccountOption(option, {
-    username = '',
-    hasPassword = false,
-    showBrowser = false,
-    autoCookieRefresh = true
-} = {}) {
-    if (!option) return;
-    const accountId = option.value;
-    const hasCredentials = Boolean(username) && Boolean(hasPassword);
-    option.dataset.username = username || '';
-    option.dataset.hasCredentials = hasCredentials ? 'true' : 'false';
-    option.dataset.showBrowser = showBrowser ? 'true' : 'false';
-    option.dataset.autoRefresh = autoCookieRefresh ? 'true' : 'false';
-
-    if (option.parentElement?.id === 'credentialConfigAccountSelect') {
-        const credentialText = hasCredentials ? '已配置账密' : '未配置账密';
-        const autoRefreshText = autoCookieRefresh ? '自动刷新开' : '自动刷新关';
-        option.textContent = `${accountId} (${credentialText} / ${autoRefreshText})`;
-    } else if (option.parentElement?.id === 'refreshCookieAccountSelect') {
-        const credentialText = hasCredentials ? '(已配置账密)' : '(未配置账密)';
-        option.textContent = `${accountId} ${credentialText}`;
-    }
-}
-
-async function refreshCredentialViews(accountId, fallback = null) {
-    const normalizedId = String(accountId || '').trim();
-    if (!normalizedId) return;
-
-    let latestDetails = null;
-    try {
-        latestDetails = await fetchJSONSilent(`${apiBase}/cookie/${encodeURIComponent(normalizedId)}/details?include_secrets=true`);
-    } catch (error) {
-        console.warn('刷新账密视图时获取账号详情失败，使用前端回填值:', error);
-    }
-
-    const resolved = {
-        username: latestDetails?.username ?? fallback?.username ?? '',
-        hasPassword: latestDetails ? Boolean(latestDetails.password) : Boolean(fallback?.hasPassword),
-        showBrowser: latestDetails?.show_browser ?? fallback?.showBrowser ?? false,
-        autoCookieRefresh: latestDetails?.auto_cookie_refresh ?? fallback?.autoCookieRefresh ?? true
-    };
-
-    const credentialSelect = document.getElementById('credentialConfigAccountSelect');
-    const refreshSelect = document.getElementById('refreshCookieAccountSelect');
-    const credentialOption = credentialSelect?.querySelector(`option[value="${CSS.escape(normalizedId)}"]`);
-    const refreshOption = refreshSelect?.querySelector(`option[value="${CSS.escape(normalizedId)}"]`);
-
-    updateCredentialAccountOption(credentialOption, resolved);
-    updateCredentialAccountOption(refreshOption, resolved);
-
-    if (credentialSelect && credentialSelect.value === normalizedId) {
-        document.getElementById('credentialConfigUsername').value = resolved.username || '';
-        document.getElementById('credentialConfigPassword').value = latestDetails?.password || '';
-        document.getElementById('credentialConfigShowBrowser').checked = Boolean(resolved.showBrowser);
-        document.getElementById('credentialConfigAutoRefresh').checked = Boolean(resolved.autoCookieRefresh);
-    }
-
-    if (refreshSelect && refreshSelect.value === normalizedId) {
-        const statusDiv = document.getElementById('refreshCookieAccountStatus');
-        if (statusDiv) {
-            if (resolved.username && resolved.hasPassword) {
-                statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>已配置用户名: ${resolved.username}</span>`;
-            } else {
-                statusDiv.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>未配置用户名和密码，无法刷新</span> <button type="button" class="btn btn-sm btn-outline-info ms-2" onclick="openCredentialConfigFromRefresh()">立即配置</button>`;
-            }
-        }
-        const autoRefreshToggle = document.getElementById('refreshCookieAutoRefresh');
-        if (autoRefreshToggle) {
-            autoRefreshToggle.checked = Boolean(resolved.autoCookieRefresh);
-        }
-    }
-
-    await loadCookies();
-}
-
-async function fetchJSONSilent(url, opts = {}) {
-    if (authToken) {
-        opts.headers = opts.headers || {};
-        opts.headers['Authorization'] = `Bearer ${authToken}`;
-    }
-
-    const res = await fetch(url, opts);
-    if (res.status === 401) {
-        localStorage.removeItem('auth_token');
-        window.location.href = '/';
-        return;
-    }
-    if (!res.ok) {
-        let errorMessage = `HTTP ${res.status}`;
-        try {
-            const errorText = await res.text();
-            if (errorText) {
-                try {
-                    const errorJson = JSON.parse(errorText);
-                    errorMessage = errorJson.detail || errorJson.message || errorText;
-                } catch {
-                    errorMessage = errorText;
-                }
-            }
-        } catch {
-            errorMessage = `HTTP ${res.status} ${res.statusText}`;
-        }
-        throw new Error(errorMessage);
-    }
-    return res.json();
 }
 
 // 加载账号列表到刷新Cookie下拉框
@@ -13360,7 +13333,6 @@ async function loadRefreshCookieAccountList() {
                 option.textContent = `${cookie.id} ${hasCredentials}`;
                 option.dataset.hasCredentials = cookie.username && cookie.has_password ? 'true' : 'false';
                 option.dataset.username = cookie.username || '';
-                option.dataset.autoRefresh = cookie.auto_cookie_refresh === undefined || cookie.auto_cookie_refresh ? 'true' : 'false';
                 select.appendChild(option);
             });
         }
@@ -13383,13 +13355,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 const username = selectedOption.dataset.username;
 
                 if (hasCredentials) {
-                    statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>已配置用户名: ${username}</span><span class="text-muted ms-2">手动刷新不会自动输入密码</span>`;
+                    statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>已配置用户名: ${username}</span>`;
                 } else {
-                    statusDiv.innerHTML = `<span class="text-info"><i class="bi bi-info-circle me-1"></i>未配置账密，也可手动选择扫码或其他方式验证</span>`;
-                }
-                const autoRefreshToggle = document.getElementById('refreshCookieAutoRefresh');
-                if (autoRefreshToggle) {
-                    autoRefreshToggle.checked = selectedOption.dataset.autoRefresh !== 'false';
+                    statusDiv.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>未配置用户名和密码，无法刷新</span>`;
                 }
             } else {
                 statusDiv.innerHTML = '请先选择账号';
@@ -13402,16 +13370,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (refreshForm) {
         refreshForm.addEventListener('submit', handleRefreshCookie);
     }
-
-    const credentialForm = document.getElementById('credentialConfigFormElement');
-    if (credentialForm) {
-        credentialForm.addEventListener('submit', saveCredentialConfig);
-    }
-
-    const credentialSelect = document.getElementById('credentialConfigAccountSelect');
-    if (credentialSelect) {
-        credentialSelect.addEventListener('change', fillCredentialConfigFromSelectedAccount);
-    }
 });
 
 // 处理刷新Cookie表单提交
@@ -13420,10 +13378,17 @@ async function handleRefreshCookie(event) {
 
     const select = document.getElementById('refreshCookieAccountSelect');
     const cookieId = select.value;
-    const autoRefresh = document.getElementById('refreshCookieAutoRefresh')?.checked ?? true;
+    const selectedOption = select.options[select.selectedIndex];
+    const showBrowser = document.getElementById('refreshCookieShowBrowser').checked;
 
     if (!cookieId) {
         showToast('请选择要刷新的账号', 'warning');
+        return;
+    }
+
+    const hasCredentials = selectedOption.dataset.hasCredentials === 'true';
+    if (!hasCredentials) {
+        showToast('该账号未配置用户名和密码，无法刷新Cookie', 'danger');
         return;
     }
 
@@ -13431,18 +13396,6 @@ async function handleRefreshCookie(event) {
     toggleLoading(true);
 
     try {
-        try {
-            await fetchJSON(`${apiBase}/cookies/${encodeURIComponent(cookieId)}/auto-cookie-refresh`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    auto_cookie_refresh: autoRefresh
-                })
-            });
-        } catch (autoRefreshError) {
-            console.warn('自动刷新Cookie开关同步失败，继续执行本次手动刷新:', autoRefreshError);
-        }
-
         // 调用密码登录API刷新Cookie
         const response = await fetch(`${apiBase}/password-login`, {
             method: 'POST',
@@ -13453,7 +13406,7 @@ async function handleRefreshCookie(event) {
             body: JSON.stringify({
                 account_id: cookieId,
                 refresh_mode: true,  // 标记为刷新模式
-                show_browser: true
+                show_browser: showBrowser
             })
         });
 
@@ -13461,7 +13414,7 @@ async function handleRefreshCookie(event) {
 
         if (data.session_id) {
             // 开始轮询检查登录状态
-            showToast('已打开浏览器，请自行选择扫码、密码或其他验证方式，完成后会自动刷新Cookie', 'info');
+            showToast('正在验证账号并刷新Cookie，请稍候...', 'info');
             startRefreshCookiePolling(data.session_id, cookieId);
         } else {
             toggleLoading(false);
@@ -13471,26 +13424,6 @@ async function handleRefreshCookie(event) {
         toggleLoading(false);
         console.error('刷新Cookie失败:', error);
         showToast('刷新Cookie失败: ' + error.message, 'danger');
-    }
-}
-
-async function toggleAutoCookieRefresh(accountId, enabled) {
-    try {
-        toggleLoading(true);
-        const result = await fetchJSON(`${apiBase}/cookies/${encodeURIComponent(accountId)}/auto-cookie-refresh`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                auto_cookie_refresh: enabled
-            })
-        });
-        showToast(result.message || `自动刷新Cookie已${enabled ? '开启' : '关闭'}`, 'success');
-        loadCookies();
-    } catch (error) {
-        console.error('切换自动刷新Cookie失败:', error);
-        showToast(`切换自动刷新Cookie失败: ${error.message || '未知错误'}`, 'danger');
-    } finally {
-        toggleLoading(false);
     }
 }
 
@@ -13536,7 +13469,7 @@ function startRefreshCookiePolling(sessionId, cookieId) {
     };
 
     let checkCount = 0;
-    const maxChecks = 480; // 最多检查480次，每次2秒，共16分钟，给扫码/人脸验证留足时间
+    const maxChecks = 120; // 最多检查120次，每次2秒，共4分钟
 
     const pollRefreshCookieStatus = async () => {
         if (refreshCookiePollingState.completed || refreshCookiePollingState.inFlight || refreshCookiePollingState.sessionId !== sessionId) {
@@ -13645,23 +13578,23 @@ let passwordLoginQRModalState = {
 // 处理账号密码登录表单提交
 async function handlePasswordLogin(event) {
     event.preventDefault();
-
+    
     const accountId = document.getElementById('passwordLoginAccountId').value.trim();
     const account = document.getElementById('passwordLoginAccount').value.trim();
     const password = document.getElementById('passwordLoginPassword').value;
     const showBrowser = document.getElementById('passwordLoginShowBrowser').checked;
-
+    
     if (!accountId || !account || !password) {
         showToast('请填写完整的登录信息', 'warning');
         return;
     }
-
+    
     // 禁用提交按钮，显示加载状态
     const submitBtn = event.target.querySelector('button[type="submit"]');
     const originalText = submitBtn.innerHTML;
     submitBtn.disabled = true;
     submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>登录中...';
-
+    
     try {
         const response = await fetch(`${apiBase}/password-login`, {
             method: 'POST',
@@ -13676,9 +13609,9 @@ async function handlePasswordLogin(event) {
                 show_browser: showBrowser
             })
         });
-
+        
         const data = await response.json();
-
+        
         if (response.ok && data.success && data.session_id) {
             passwordLoginSessionId = data.session_id;
             // 开始轮询检查登录状态
@@ -13716,14 +13649,14 @@ async function checkPasswordLoginStatus() {
 
     const sessionId = passwordLoginSessionId;
     passwordLoginPollingState.inFlight = true;
-
+    
     try {
         const response = await fetch(`${apiBase}/password-login/check/${sessionId}`, {
             headers: {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         if (response.ok) {
             const data = await response.json();
 
@@ -13732,7 +13665,7 @@ async function checkPasswordLoginStatus() {
             }
 
             console.log('账号密码登录状态检查:', data); // 调试日志
-
+            
             switch (data.status) {
                 case 'processing':
                     // 处理中，继续等待
@@ -13896,32 +13829,32 @@ function showPasswordLoginQRCode(verificationUrl, screenshotPath, verificationTy
         modal = document.getElementById('passwordLoginQRModal');
     }
     bindPasswordLoginQRModalEvents(modal);
-
+    
     // 更新模态框标题
     const modalTitle = document.getElementById('passwordLoginQRModalLabel');
     if (modalTitle) {
         modalTitle.innerHTML = '<i class="bi bi-shield-exclamation text-warning me-2"></i>闲鱼验证';
     }
-
+    
     // 获取或创建模态框实例
     let modalInstance = bootstrap.Modal.getInstance(modal);
     if (!modalInstance) {
         modalInstance = new bootstrap.Modal(modal);
     }
     modalInstance.show();
-
+    
     // 隐藏加载容器
     const qrContainer = document.getElementById('passwordLoginQRContainer');
     if (qrContainer) {
         qrContainer.style.display = 'none';
     }
-
+    
     // 优先显示截图，如果没有截图则显示链接
     const screenshotImg = document.getElementById('passwordLoginScreenshotImg');
     const linkButton = document.getElementById('passwordLoginVerificationLink');
     const statusText = document.getElementById('passwordLoginQRStatusText');
     const verificationTypeLabel = getPasswordLoginVerificationTypeLabel(verificationType);
-
+    
     if (screenshotPath) {
         // 显示截图
         if (screenshotImg) {
@@ -13929,12 +13862,12 @@ function showPasswordLoginQRCode(verificationUrl, screenshotPath, verificationTy
             screenshotImg.style.display = 'block';
             screenshotImg.alt = `${verificationTypeLabel}截图`;
         }
-
+        
         // 隐藏链接按钮
         if (linkButton) {
             linkButton.style.display = 'none';
         }
-
+        
         // 更新状态文本
         if (statusText) {
             statusText.textContent = verificationTypeLabel === '二维码验证'
@@ -13946,13 +13879,13 @@ function showPasswordLoginQRCode(verificationUrl, screenshotPath, verificationTy
         if (screenshotImg) {
             screenshotImg.style.display = 'none';
         }
-
+        
         // 显示链接按钮
         if (linkButton) {
             linkButton.href = verificationUrl;
             linkButton.style.display = 'inline-block';
         }
-
+        
         // 更新状态文本
         if (statusText) {
             statusText.textContent = `服务端已保持原始会话；如${verificationTypeLabel}入口暂未显示，可使用下方兜底入口`;
@@ -14032,22 +13965,22 @@ function createPasswordLoginQRModal() {
                         <p id="passwordLoginQRStatusText" class="text-muted mb-3">
                             需要闲鱼身份验证，请等待验证信息...
                         </p>
-
+                        
                         <!-- 截图显示区域 -->
                         <div id="passwordLoginScreenshotContainer" class="mb-3 d-flex justify-content-center">
-                            <img id="passwordLoginScreenshotImg" src="" alt="验证截图"
+                            <img id="passwordLoginScreenshotImg" src="" alt="验证截图" 
                                  class="img-fluid" style="display: none; max-width: 400px; height: auto; border: 2px solid #ddd; border-radius: 8px;">
                         </div>
-
+                        
                         <!-- 验证链接按钮（回退方案） -->
                         <div id="passwordLoginLinkContainer" class="mt-4">
-                            <a id="passwordLoginVerificationLink" href="#" target="_blank"
+                            <a id="passwordLoginVerificationLink" href="#" target="_blank" 
                                class="btn btn-warning btn-lg" style="display: none;">
                                 <i class="bi bi-shield-check me-2"></i>
                                 打开兜底验证页面
                             </a>
                         </div>
-
+                        
                         <div class="alert alert-info mt-3">
                             <i class="bi bi-info-circle me-2"></i>
                             <small>验证完成后，系统将自动检测并继续登录流程</small>
@@ -14057,7 +13990,7 @@ function createPasswordLoginQRModal() {
             </div>
         </div>
     `;
-
+    
     document.body.insertAdjacentHTML('beforeend', modalHtml);
     bindPasswordLoginQRModalEvents(document.getElementById('passwordLoginQRModal'));
 }
@@ -14066,15 +13999,15 @@ function createPasswordLoginQRModal() {
 function handlePasswordLoginSuccess(data) {
     // 关闭二维码模态框
     closePasswordLoginQRModal();
-
+    
     showToast(`账号 ${data.account_id} 登录成功！`, 'success');
-
+    
     // 隐藏表单
     togglePasswordLogin();
-
+    
     // 刷新账号列表
     loadCookies();
-
+    
     // 重置表单
     resetPasswordLoginForm();
 }
@@ -14082,16 +14015,16 @@ function handlePasswordLoginSuccess(data) {
 // 处理账号密码登录失败
 function handlePasswordLoginFailure(data) {
     console.log('账号密码登录失败，错误数据:', data); // 调试日志
-
+    
     // 关闭二维码模态框
     closePasswordLoginQRModal();
-
+    
     // 优先使用 message，如果没有则使用 error 字段
     const errorMessage = data.message || data.error || '登录失败，请检查账号密码是否正确';
     console.log('显示错误消息:', errorMessage); // 调试日志
-
+    
     showToast(errorMessage, 'danger');  // 使用 'danger' 而不是 'error'，因为 Bootstrap 使用 'danger' 作为错误类型
-
+    
     // 重置表单
     resetPasswordLoginForm();
 }
@@ -14113,7 +14046,7 @@ function resetPasswordLoginForm() {
         inFlight: false,
         completed: false
     };
-
+    
     const submitBtn = document.querySelector('#passwordLoginFormElement button[type="submit"]');
     if (submitBtn) {
         submitBtn.disabled = false;
@@ -14780,7 +14713,7 @@ async function addImageKeyword() {
         .split(/[\|\n]/)
         .map(k => k.trim())
         .filter(k => k.length > 0);
-
+    
     if (keywords.length === 0) {
         showToast('请填写有效的关键词', 'warning');
         return;
@@ -14790,7 +14723,7 @@ async function addImageKeyword() {
     let itemIds = selectedOptions
         .map(opt => opt.value)
         .filter(id => id !== ''); // 过滤掉空值（通用关键词选项）
-
+    
     // 如果没有选中任何商品，或者选中了空值，则作为通用关键词
     if (itemIds.length === 0) {
         itemIds = [''];
@@ -14878,7 +14811,7 @@ async function addImageKeyword() {
             if (successCount > 0) {
                 const keywordText = keywords.length > 1 ? `${keywords.length}个关键词` : `"${keywords[0]}"`;
                 const itemText = itemIds.length > 1 ? `${itemIds.length}个商品` : (itemIds[0] ? '指定商品' : '通用');
-
+                
                 if (failCount === 0) {
                     showToast(`✨ ${keywordText} 添加成功！（共${totalCount}条配置，应用于${itemText}）`, 'success');
                 } else {
@@ -15013,7 +14946,7 @@ async function exportKeywords() {
 // 编辑备注
 function editRemark(cookieId, currentRemark) {
     console.log('editRemark called:', cookieId, currentRemark); // 调试信息
-    const remarkCell = document.querySelector(`[data-cookie-id="${encodeURIComponent(cookieId)}"] .remark-display`);
+    const remarkCell = document.querySelector(`[data-cookie-id="${cookieId}"] .remark-display`);
     if (!remarkCell) {
         console.log('remarkCell not found'); // 调试信息
         return;
@@ -15075,8 +15008,8 @@ function editRemark(cookieId, currentRemark) {
             if (response.ok) {
                 // 更新显示
                 remarkCell.innerHTML = `
-                    <span class="remark-display" onclick="editRemark(decodeURIComponent('${encodeURIComponent(cookieId)}'), decodeURIComponent('${encodeURIComponent(newRemark)}'))" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
-                        ${newRemark ? escapeHtml(newRemark) : '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
+                    <span class="remark-display" onclick="editRemark('${cookieId}', '${newRemark.replace(/'/g, '&#39;')}')" title="点击编辑备注" style="cursor: pointer; color: #6c757d; font-size: 0.875rem;">
+                        ${newRemark || '<i class="bi bi-plus-circle text-muted"></i> 添加备注'}
                     </span>
                 `;
                 showToast('备注更新成功', 'success');
@@ -15280,7 +15213,6 @@ async function loadSystemSettings() {
             // 显示/隐藏管理员专用设置（仅管理员可见）
             const apiSecuritySettings = document.getElementById('api-security-settings');
             const loginInfoSettings = document.getElementById('login-info-settings');
-            const riskProtectionSettings = document.getElementById('risk-protection-settings');
             const riskControlSettings = document.getElementById('risk-control-settings');
             const outgoingConfigs = document.getElementById('outgoing-configs');
             const backupManagement = document.getElementById('backup-management');
@@ -15292,9 +15224,6 @@ async function loadSystemSettings() {
             }
             if (loginInfoSettings) {
                 loginInfoSettings.style.display = isAdmin ? 'flex' : 'none';
-            }
-            if (riskProtectionSettings) {
-                riskProtectionSettings.style.display = isAdmin ? 'flex' : 'none';
             }
             if (riskControlSettings) {
                 riskControlSettings.style.display = isAdmin ? 'block' : 'none';
@@ -15318,7 +15247,6 @@ async function loadSystemSettings() {
                 await loadAPISecuritySettings();
                 await loadRegistrationSettings();
                 await loadLoginInfoSettings();
-                await loadRiskProtectionSettings();
                 await loadRiskControlNightSettings();
                 await loadOutgoingConfigs();
             }
@@ -15327,14 +15255,10 @@ async function loadSystemSettings() {
         console.error('获取用户信息失败:', error);
         // 出错时隐藏管理员功能
         const loginInfoSettings = document.getElementById('login-info-settings');
-        const riskProtectionSettings = document.getElementById('risk-protection-settings');
         const riskControlSettings = document.getElementById('risk-control-settings');
         const dashboardHotUpdateGroup = document.getElementById('dashboardHotUpdateGroup');
         if (loginInfoSettings) {
             loginInfoSettings.style.display = 'none';
-        }
-        if (riskProtectionSettings) {
-            riskProtectionSettings.style.display = 'none';
         }
         if (riskControlSettings) {
             riskControlSettings.style.display = 'none';
@@ -15342,102 +15266,6 @@ async function loadSystemSettings() {
         if (dashboardHotUpdateGroup) {
             dashboardHotUpdateGroup.style.display = 'none';
         }
-    }
-}
-
-function setNumberInputValue(inputId, value, fallback) {
-    const input = document.getElementById(inputId);
-    if (!input) return;
-    const parsed = parseInt(value, 10);
-    input.value = Number.isFinite(parsed) ? parsed : fallback;
-}
-
-async function loadRiskProtectionSettings() {
-    try {
-        const response = await fetch('/system-settings', {
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error('加载系统设置失败');
-        }
-
-        const settings = await response.json();
-        setNumberInputValue('riskThrottleWindowMinutes', settings.risk_auth_throttle_window_minutes, 30);
-        setNumberInputValue('riskThrottleFailureThreshold', settings.risk_auth_throttle_failure_threshold, 3);
-        setNumberInputValue('riskHealthAlertCooldownMinutes', settings.risk_health_alert_cooldown_minutes, 60);
-
-        const alertEnabled = document.getElementById('riskHealthAlertEnabled');
-        if (alertEnabled) {
-            alertEnabled.checked = settings.risk_health_alert_enabled === undefined
-                ? true
-                : settings.risk_health_alert_enabled === 'true';
-        }
-    } catch (error) {
-        console.error('加载风控保护设置失败:', error);
-        showToast('加载风控保护设置失败', 'danger');
-    }
-}
-
-function getClampedNumberInput(inputId, fallback, min, max) {
-    const input = document.getElementById(inputId);
-    const parsed = parseInt(input?.value, 10);
-    if (!Number.isFinite(parsed)) {
-        return fallback;
-    }
-    return Math.max(min, Math.min(parsed, max));
-}
-
-async function updateRiskProtectionSettings() {
-    const configs = [
-        {
-            key: 'risk_auth_throttle_window_minutes',
-            value: String(getClampedNumberInput('riskThrottleWindowMinutes', 30, 5, 1440)),
-            description: '自动账密恢复熔断统计窗口（分钟）'
-        },
-        {
-            key: 'risk_auth_throttle_failure_threshold',
-            value: String(getClampedNumberInput('riskThrottleFailureThreshold', 3, 1, 20)),
-            description: '自动账密恢复熔断失败次数阈值'
-        },
-        {
-            key: 'risk_health_alert_cooldown_minutes',
-            value: String(getClampedNumberInput('riskHealthAlertCooldownMinutes', 60, 5, 1440)),
-            description: '风控健康摘要告警冷却时间（分钟）'
-        },
-        {
-            key: 'risk_health_alert_enabled',
-            value: document.getElementById('riskHealthAlertEnabled')?.checked ? 'true' : 'false',
-            description: '是否开启风控健康摘要告警'
-        }
-    ];
-
-    try {
-        for (const config of configs) {
-            const response = await fetch(`/system-settings/${config.key}`, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${authToken}`
-                },
-                body: JSON.stringify({
-                    value: config.value,
-                    description: config.description
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`保存 ${config.key} 失败`);
-            }
-        }
-
-        showToast('风控保护设置已保存', 'success');
-        await loadRiskProtectionSettings();
-    } catch (error) {
-        console.error('保存风控保护设置失败:', error);
-        showToast(`保存风控保护设置失败: ${error.message}`, 'danger');
     }
 }
 
@@ -15710,10 +15538,10 @@ async function loadOutgoingConfigs() {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         if (response.ok) {
             const settings = await response.json();
-
+            
             // 渲染外发配置界面
             renderOutgoingConfigs(settings);
         }
@@ -15727,9 +15555,9 @@ async function loadOutgoingConfigs() {
 function renderOutgoingConfigs(settings) {
     const container = document.getElementById('outgoing-configs');
     if (!container) return;
-
+    
     let html = '<div class="row">';
-
+    
     // 渲染SMTP配置
     const smtpConfig = outgoingConfigs.smtp;
     html += `
@@ -15745,7 +15573,7 @@ function renderOutgoingConfigs(settings) {
                     <p class="text-muted">${smtpConfig.description}</p>
                     <form id="smtp-config-form">
                         <div class="row">`;
-
+    
     smtpConfig.fields.forEach(field => {
         const value = settings[field.id] || '';
         html += `
@@ -15755,7 +15583,7 @@ function renderOutgoingConfigs(settings) {
                 <div class="form-text">${field.help}</div>
             </div>`;
     });
-
+    
     html += `
                         </div>
                         <div class="text-end">
@@ -15767,10 +15595,10 @@ function renderOutgoingConfigs(settings) {
                 </div>
             </div>
         </div>`;
-
+    
     html += '</div>';
     container.innerHTML = html;
-
+    
     // 绑定表单提交事件
     const form = document.getElementById('smtp-config-form');
     if (form) {
@@ -15788,16 +15616,16 @@ function generateOutgoingFieldHtml(field, value) {
                 options += `<option value="${option.value}" ${selected}>${option.text}</option>`;
             });
             return `<select class="form-select" id="${field.id}" name="${field.id}" ${field.required ? 'required' : ''}>${options}</select>`;
-
+        
         case 'password':
             return `<input type="password" class="form-control" id="${field.id}" name="${field.id}" value="${value}" placeholder="${field.placeholder}" ${field.required ? 'required' : ''}>`;
-
+        
         case 'number':
             return `<input type="number" class="form-control" id="${field.id}" name="${field.id}" value="${value}" placeholder="${field.placeholder}" ${field.required ? 'required' : ''}>`;
-
+        
         case 'email':
             return `<input type="email" class="form-control" id="${field.id}" name="${field.id}" value="${value}" placeholder="${field.placeholder}" ${field.required ? 'required' : ''}>`;
-
+        
         default:
             return `<input type="text" class="form-control" id="${field.id}" name="${field.id}" value="${value}" placeholder="${field.placeholder}" ${field.required ? 'required' : ''}>`;
     }
@@ -15806,16 +15634,16 @@ function generateOutgoingFieldHtml(field, value) {
 // 保存外发配置
 async function saveOutgoingConfigs(event) {
     event.preventDefault();
-
+    
     const form = event.target;
     const formData = new FormData(form);
     const configs = {};
-
+    
     // 收集表单数据
     for (let [key, value] of formData.entries()) {
         configs[key] = value;
     }
-
+    
     try {
         // 逐个保存配置项
         for (const [key, value] of Object.entries(configs)) {
@@ -15831,17 +15659,17 @@ async function saveOutgoingConfigs(event) {
                     description: `SMTP配置 - ${key}`
                 })
             });
-
+            
             if (!response.ok) {
                 throw new Error(`保存${key}失败`);
             }
         }
-
+        
         showToast('外发配置保存成功', 'success');
-
+        
         // 重新加载配置
         await loadOutgoingConfigs();
-
+        
     } catch (error) {
         console.error('保存外发配置失败:', error);
         showToast('保存外发配置失败: ' + error.message, 'danger');
@@ -16400,7 +16228,7 @@ function getOrderStatusClass(status) {
         'refund_cancelled': 'bg-info text-dark',
         'cancelled': 'bg-secondary text-white',
         'unknown': 'bg-secondary text-white'
-    };
+    }; 
     return statusMap[normalizedStatus] || statusMap[status] || 'bg-secondary text-white';
 }
 
@@ -18787,197 +18615,6 @@ let currentRiskLogStatus = '';
 let currentRiskLogOffset = 0;
 const riskLogLimit = 100;
 let currentRiskSliderStatsRequestId = 0;
-let currentRiskHealthRequestId = 0;
-
-function getRiskHealthMeta(level = 'normal') {
-    const normalizedLevel = String(level || 'normal').trim().toLowerCase();
-    const metaMap = {
-        normal: {
-            className: 'is-normal',
-            icon: 'bi-shield-check',
-            fallbackTitle: '运行平稳'
-        },
-        attention: {
-            className: 'is-attention',
-            icon: 'bi-exclamation-circle',
-            fallbackTitle: '需要关注'
-        },
-        warning: {
-            className: 'is-warning',
-            icon: 'bi-shield-exclamation',
-            fallbackTitle: '近期失败偏多'
-        },
-        critical: {
-            className: 'is-critical',
-            icon: 'bi-shield-fill-exclamation',
-            fallbackTitle: '账号保护中'
-        }
-    };
-
-    return metaMap[normalizedLevel] || metaMap.normal;
-}
-
-function formatRiskLookback(minutes = 1440) {
-    const value = Number(minutes);
-    if (!Number.isFinite(value) || value <= 0) {
-        return '近 24 小时';
-    }
-    if (value >= 1440 && value % 1440 === 0) {
-        return `近 ${value / 1440} 天`;
-    }
-    if (value >= 60 && value % 60 === 0) {
-        return `近 ${value / 60} 小时`;
-    }
-    return `近 ${Math.round(value)} 分钟`;
-}
-
-function setRiskHealthSummaryLoading() {
-    const card = document.getElementById('riskHealthSummaryCard');
-    const title = document.getElementById('riskHealthTitle');
-    const subtitle = document.getElementById('riskHealthSubtitle');
-    const failedCount = document.getElementById('riskHealthFailedCount');
-    const processingCount = document.getElementById('riskHealthProcessingCount');
-    const protectedCount = document.getElementById('riskHealthProtectedCount');
-    const recommendations = document.getElementById('riskHealthRecommendations');
-    const hotspots = document.getElementById('riskHealthHotspots');
-
-    if (card) {
-        card.classList.remove('is-normal', 'is-attention', 'is-warning', 'is-critical');
-        card.classList.add('is-loading');
-    }
-    if (title) title.textContent = '正在检查风控状态...';
-    if (subtitle) subtitle.textContent = '汇总近 24 小时失败、处理中和账号保护情况';
-    if (failedCount) failedCount.textContent = '--';
-    if (processingCount) processingCount.textContent = '--';
-    if (protectedCount) protectedCount.textContent = '--';
-    if (recommendations) recommendations.innerHTML = '<span class="text-muted small">正在生成建议...</span>';
-    if (hotspots) {
-        hotspots.style.display = 'none';
-        hotspots.innerHTML = '';
-    }
-}
-
-function renderRiskHealthSummary(summary = {}) {
-    const card = document.getElementById('riskHealthSummaryCard');
-    const icon = document.getElementById('riskHealthIcon');
-    const title = document.getElementById('riskHealthTitle');
-    const subtitle = document.getElementById('riskHealthSubtitle');
-    const failedCount = document.getElementById('riskHealthFailedCount');
-    const processingCount = document.getElementById('riskHealthProcessingCount');
-    const protectedCount = document.getElementById('riskHealthProtectedCount');
-    const recommendations = document.getElementById('riskHealthRecommendations');
-    const hotspots = document.getElementById('riskHealthHotspots');
-
-    const meta = getRiskHealthMeta(summary.health_level);
-    const lookbackText = formatRiskLookback(summary.lookback_minutes || 1440);
-    const failed = Number(summary.failed_count || 0);
-    const processing = Number(summary.processing_count || 0);
-    const protectedAccounts = Number(summary.risk_protected_accounts || summary.risk_protected_count || 0);
-    const accountsWithFailures = Number(summary.accounts_with_failures || 0);
-    const sliderFailures = Number(summary.slider_failed_count || 0);
-    const latestFailure = formatBeijingDateTime(summary.latest_failed_at);
-
-    if (card) {
-        card.classList.remove('is-loading', 'is-normal', 'is-attention', 'is-warning', 'is-critical');
-        card.classList.add(meta.className);
-    }
-    if (icon) {
-        icon.innerHTML = `<i class="bi ${meta.icon}"></i>`;
-    }
-    if (title) {
-        title.textContent = summary.health_label || meta.fallbackTitle;
-    }
-    if (subtitle) {
-        const accountText = accountsWithFailures > 0 ? `，涉及 ${accountsWithFailures} 个账号` : '';
-        const sliderText = sliderFailures > 0 ? `，滑块失败 ${sliderFailures} 次` : '';
-        const latestText = latestFailure !== '--' ? `，最近失败 ${latestFailure}` : '';
-        subtitle.textContent = `${lookbackText}：失败 ${failed} 次、处理中 ${processing} 次${accountText}${sliderText}${latestText}`;
-    }
-    if (failedCount) failedCount.textContent = String(failed);
-    if (processingCount) processingCount.textContent = String(processing);
-    if (protectedCount) protectedCount.textContent = String(protectedAccounts);
-
-    if (recommendations) {
-        const items = Array.isArray(summary.recommendations) && summary.recommendations.length
-            ? summary.recommendations
-            : ['暂无近期风控异常，继续保持当前运行节奏'];
-        recommendations.innerHTML = items.map((item) => `
-            <span class="risk-health-recommendation">
-                <i class="bi bi-check2-circle"></i>
-                ${escapeHtml(item)}
-            </span>
-        `).join('');
-    }
-
-    if (hotspots) {
-        const accounts = Array.isArray(summary.top_failed_accounts) ? summary.top_failed_accounts : [];
-        if (accounts.length) {
-            hotspots.style.display = 'grid';
-            hotspots.innerHTML = accounts.slice(0, 3).map((account) => {
-                const cookieId = account.cookie_id || '-';
-                const failedCount = Number(account.failed_count || 0);
-                const sliderFailedCount = Number(account.slider_failed_count || 0);
-                const latestText = formatBeijingDateTime(account.latest_failed_at);
-                const actionText = protectedAccounts > 0
-                    ? '建议先去闲鱼客户端处理后再启用'
-                    : '建议暂停自动刷新并优先手动确认状态';
-                return `
-                    <div class="risk-health-hotspot">
-                        <div class="risk-health-hotspot-title">
-                            <i class="bi bi-person-exclamation"></i>
-                            <strong>${escapeHtml(cookieId)}</strong>
-                        </div>
-                        <div class="risk-health-hotspot-meta">
-                            失败 ${failedCount} 次，滑块失败 ${sliderFailedCount} 次，最近 ${escapeHtml(latestText)}
-                        </div>
-                        <div class="risk-health-hotspot-action">${escapeHtml(actionText)}</div>
-                    </div>
-                `;
-            }).join('');
-        } else {
-            hotspots.style.display = 'none';
-            hotspots.innerHTML = '';
-        }
-    }
-}
-
-async function loadRiskHealthSummary() {
-    const token = localStorage.getItem('auth_token');
-    const requestId = ++currentRiskHealthRequestId;
-
-    setRiskHealthSummaryLoading();
-
-    try {
-        const response = await fetch('/admin/risk-health-summary?lookback_hours=24', {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
-        });
-        const data = await response.json();
-        if (requestId !== currentRiskHealthRequestId) {
-            return;
-        }
-        if (response.ok && data.success) {
-            renderRiskHealthSummary(data.data || {});
-            return;
-        }
-        renderRiskHealthSummary({
-            health_level: 'attention',
-            health_label: '摘要加载失败',
-            recommendations: [data.message || '无法获取风控健康摘要，请稍后重试']
-        });
-    } catch (error) {
-        console.error('加载风控健康摘要失败:', error);
-        if (requestId !== currentRiskHealthRequestId) {
-            return;
-        }
-        renderRiskHealthSummary({
-            health_level: 'attention',
-            health_label: '摘要加载失败',
-            recommendations: ['无法获取风控健康摘要，请检查服务是否正常运行']
-        });
-    }
-}
 
 function getRiskSliderStatsRange() {
     const activeButton = document.querySelector('#riskSliderRangeFilter .risk-slider-range-btn.is-active');
@@ -19260,7 +18897,6 @@ async function loadRiskControlLogs(offset = 0) {
     const limit = filters.limit;
     currentRiskLogOffset = offset;
 
-    loadRiskHealthSummary();
     loadRiskControlSliderStats(cookieId);
 
     const loadingDiv = document.getElementById('loadingRiskLogs');
@@ -19357,7 +18993,7 @@ function getRiskTriggerSceneLabel(triggerScene) {
     const sceneLabels = {
         token_refresh: 'Token刷新',
         auto_cookie_refresh: '自动Cookie刷新',
-        manual_password_refresh: '手动验证刷新',
+        manual_password_refresh: '手动账密刷新',
         manual_qr_refresh: '手动扫码刷新',
         password_login: '密码登录',
         qr_login: '扫码登录'
@@ -19711,13 +19347,13 @@ async function handleItemSearch(event) {
         }
 
         const token = localStorage.getItem('auth_token');
-
+        
         // 启动会话检查器（在搜索过程中检查是否有验证会话）
         let sessionChecker = null;
         let checkCount = 0;
         const maxChecks = 30; // 最多检查30次（30秒）
         let isSearchCompleted = false; // 标记搜索是否完成
-
+        
         sessionChecker = setInterval(async () => {
             // 如果搜索已完成，停止检查
             if (isSearchCompleted) {
@@ -19727,12 +19363,12 @@ async function handleItemSearch(event) {
                 }
                 return;
             }
-
+            
             try {
                 checkCount++;
                 const checkResponse = await fetch('/api/captcha/sessions');
                 const checkData = await checkResponse.json();
-
+                
                 if (checkData.sessions && checkData.sessions.length > 0) {
                     for (const session of checkData.sessions) {
                         if (!session.completed) {
@@ -19741,17 +19377,17 @@ async function handleItemSearch(event) {
                                 clearInterval(sessionChecker);
                                 sessionChecker = null;
                             }
-
+                            
                             // 确保监控已启动
                             if (typeof startCaptchaSessionMonitor === 'function') {
                                 startCaptchaSessionMonitor();
                             }
-
+                            
                             // 弹出验证窗口
                             if (typeof showCaptchaVerificationModal === 'function') {
                                 showCaptchaVerificationModal(session.session_id);
                                 showToast('🎨 检测到滑块验证，请完成验证', 'warning');
-
+                                
                                 // 停止搜索时的会话检查器，因为已经弹窗了，由弹窗的监控接管
                                 if (sessionChecker) {
                                     clearInterval(sessionChecker);
@@ -19767,7 +19403,7 @@ async function handleItemSearch(event) {
                         }
                     }
                 }
-
+                
                 // 如果检查次数超过限制，停止检查
                 if (checkCount >= maxChecks) {
                     if (sessionChecker) {
@@ -19779,7 +19415,7 @@ async function handleItemSearch(event) {
                 console.error('检查验证会话失败:', error);
             }
         }, 1000); // 每秒检查一次
-
+        
         // 使用 Promise 包装，以便使用 finally
         const fetchPromise = fetch('/items/search_multiple', {
             method: 'POST',
@@ -19814,19 +19450,19 @@ async function handleItemSearch(event) {
             if (data.need_captcha || data.status === 'need_verification') {
                 console.log('检测到需要滑块验证');
                 showSearchStatus(false);
-
+                
                 // 显示滑块验证模态框
                 const sessionId = data.session_id || 'default';
                 const modal = showCaptchaVerificationModal(sessionId);
-
+                
                 try {
                     // 等待用户完成验证
                     await checkCaptchaCompletion(modal, sessionId);
-
+                    
                     // 验证成功，显示搜索状态并重新发起搜索请求
                     showSearchStatus(true);
                     document.getElementById('searchProgress').textContent = '验证成功，继续搜索商品...';
-
+                    
                     // 重新发起搜索请求
                     const retryResponse = await fetch('/items/search_multiple', {
                         method: 'POST',
@@ -19839,17 +19475,17 @@ async function handleItemSearch(event) {
                             total_pages: totalPages
                         })
                     });
-
+                    
                     if (retryResponse.ok) {
                         const retryData = await retryResponse.json();
-
+                        
                         // 再次检查是否需要验证（理论上不应该再需要）
                         if (retryData.need_captcha || retryData.status === 'need_verification') {
                             showSearchStatus(false);
                             showToast('验证后仍需要滑块，请联系管理员', 'danger');
                             return;
                         }
-
+                        
                         // 处理搜索结果
                         searchResultsData = retryData.data || [];
                         console.log('验证后搜索结果:', searchResultsData);
@@ -19897,7 +19533,7 @@ async function handleItemSearch(event) {
             }
 
             showSearchStatus(false);
-
+            
             // 确保显示搜索结果
             if (searchResultsData.length > 0) {
             displaySearchResults();
@@ -20140,7 +19776,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v2.0.1';
+const DEFAULT_VERSION = 'v2.0.2';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -20251,9 +19887,20 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v2.0.1',
+    version: 'v2.0.2',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v2.0.2',
+            date: '2026-06-03',
+            updates: [
+                '【新功能】新增黑名单管理能力，支持按买家、账号和商品维护拦截规则，自动回复、客服手动发送和发货流程会统一识别黑名单',
+                '【新功能】重写在线客服为直连闲鱼 IM 会话体验，支持账号连接状态、远程会话列表、历史消息分页和实时消息合并展示',
+                '【优化】在线客服三栏界面新增账号连接/断开、IM 来源标识、未读数、加载更多会话和更早消息入口，客服处理更集中',
+                '【修复】修复在线客服拉取会话时新建临时 WebSocket 导致主监听连接被挤下线的问题，改为复用主连接按 mid 分发 IM 响应',
+                '【修复】补强在线客服远程消息解析，文本、图片、卡片等消息可正常展示，并在 IM 异常时回退本地缓存和订单会话入口',
+            ]
+        },
         {
             version: 'v2.0.1',
             date: '2026-05-28',
@@ -20871,10 +20518,10 @@ async function loadSystemVersion() {
             console.warn('无法读取本地版本文件，使用默认版本');
             LOCAL_VERSION = DEFAULT_VERSION;
         }
-
+        
         // 显示当前本地版本
         document.getElementById('versionNumber').textContent = LOCAL_VERSION;
-
+        
         // 添加点击事件，显示更新日志
         const systemVersionBadge = document.getElementById('systemVersion');
         if (systemVersionBadge) {
@@ -20940,13 +20587,13 @@ async function showUpdateInfo(newVersion) {
     if (updateInfo.updates && updateInfo.updates.length > 0) {
         updateList = updateInfo.updates.map(item => `<li style="color: #333; margin-bottom: 8px; line-height: 1.5; font-size: 15px;"><i class="bi bi-check-circle-fill me-2" style="color: #28a745;"></i>${item}</li>`).join('');
     }
-
+    
     // 构建安装方式区域
     let installSection = '';
     if (updateInfo.installMethods && updateInfo.installMethods.length > 0) {
         installSection = updateInfo.installMethods.map(method => {
             let content = '';
-
+            
             // 如果有步骤说明（如Docker安装）
             if (method.steps && method.steps.length > 0) {
                 content = `
@@ -20955,7 +20602,7 @@ async function showUpdateInfo(newVersion) {
                     </div>
                 `;
             }
-
+            
             // 如果有下载链接（如EXE下载）
             if (method.downloads && method.downloads.length > 0) {
                 content = `
@@ -20969,7 +20616,7 @@ async function showUpdateInfo(newVersion) {
                     </div>
                 `;
             }
-
+            
             return `
                 <div style="margin-bottom: 10px; border-radius: 8px; overflow: hidden; border: 1px solid #e0e0e0;">
                     <div class="d-flex align-items-center justify-content-between" style="background: #5a67d8; color: #fff; padding: 8px 12px;">
@@ -20981,7 +20628,7 @@ async function showUpdateInfo(newVersion) {
             `;
         }).join('');
     }
-
+    
     // 兼容旧格式：构建下载按钮（如果有下载地址）
     let downloadSection = '';
     if (!installSection && updateInfo.downloadUrl) {
@@ -20993,7 +20640,7 @@ async function showUpdateInfo(newVersion) {
             </div>
         `;
     }
-
+    
     // 兼容旧格式：构建备用下载地址
     let altDownloadSection = '';
     if (!installSection && updateInfo.altDownloadUrl) {
@@ -21032,14 +20679,14 @@ async function showUpdateInfo(newVersion) {
                             </div>
                             ${updateInfo.releaseDate ? `<span style="color: #888; font-size: 14px; margin-left: 12px;"><i class="bi bi-calendar3 me-1"></i>${updateInfo.releaseDate}</span>` : ''}
                         </div>
-
+                        
                         <!-- 版本简介 -->
                         ${updateInfo.description ? `
                         <div class="rounded-3 p-3 mb-3" style="background: linear-gradient(135deg, #e3f2fd, #bbdefb); color: #1565c0; font-size: 15px; line-height: 1.5;">
                             <i class="bi bi-info-circle me-2"></i>${updateInfo.description}
                         </div>
                         ` : ''}
-
+                        
                         <!-- 更新内容 -->
                         <div class="mb-3">
                             <div class="mb-2" style="color: #444; font-size: 16px; font-weight: 600;"><i class="bi bi-list-check me-2"></i>更新内容</div>
@@ -21047,20 +20694,20 @@ async function showUpdateInfo(newVersion) {
                                 ${updateList ? `<ul class="list-unstyled mb-0">${updateList}</ul>` : '<span style="color: #999; font-size: 15px;">暂无</span>'}
                             </div>
                         </div>
-
+                        
                         <!-- 重要提示 -->
                         ${updateInfo.notice ? `
                         <div class="rounded-3 p-3 mb-3" style="background: linear-gradient(135deg, #fff3cd, #ffeeba); color: #856404; font-size: 15px; line-height: 1.5;">
                             <i class="bi bi-exclamation-triangle me-2"></i><strong>注意：</strong>${updateInfo.notice}
                         </div>
                         ` : ''}
-
+                        
                         <!-- 安装方式 -->
                         ${installSection ? `
                         <div class="mb-2" style="color: #444; font-size: 16px; font-weight: 600;"><i class="bi bi-download me-2"></i>安装/升级方式</div>
                         ${installSection}
                         ` : ''}
-
+                        
                         <!-- 兼容旧格式：下载按钮 -->
                         ${downloadSection}
                         ${altDownloadSection}
@@ -21187,12 +20834,12 @@ async function showBenefitsModal() {
     try {
         // 获取权益信息（使用缓存或重新请求）
         const benefitsData = await getBenefitsInfo();
-
+        
         if (!benefitsData || !benefitsData.benefits || benefitsData.benefits.length === 0) {
             showToast('暂无权益信息', 'info');
             return;
         }
-
+        
         // 构建权益列表
         const benefitsList = benefitsData.benefits.map(benefit => `
             <a href="${benefit.url}" target="_blank" class="benefit-item" style="text-decoration: none; display: block; margin-bottom: 12px; border-radius: 12px; overflow: hidden; border: 1px solid #e8ecf0; transition: all 0.3s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
@@ -21208,7 +20855,7 @@ async function showBenefitsModal() {
                 </div>
             </a>
         `).join('');
-
+        
         const modalHtml = `
             <div class="modal fade" id="benefitsModal" tabindex="-1">
                 <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
@@ -21227,12 +20874,12 @@ async function showBenefitsModal() {
                                 <i class="bi bi-lightbulb me-2"></i>
                                 <strong>温馨提示：</strong>以下是精选的优质权益资源，点击即可跳转查看详情。持续更新中~
                             </div>
-
+                            
                             <!-- 权益列表 -->
                             <div class="benefits-list">
                                 ${benefitsList}
                             </div>
-
+                            
                             <!-- 底部说明 -->
                             <div class="text-center mt-3" style="color: #999; font-size: 13px;">
                                 <i class="bi bi-info-circle me-1"></i>
@@ -21255,20 +20902,20 @@ async function showBenefitsModal() {
                 }
             </style>
         `;
-
+        
         // 移除已存在的模态框
         const existingModal = document.getElementById('benefitsModal');
         if (existingModal) {
             existingModal.remove();
         }
-
+        
         // 添加新的模态框
         document.body.insertAdjacentHTML('beforeend', modalHtml);
-
+        
         // 显示模态框
         const modal = new bootstrap.Modal(document.getElementById('benefitsModal'));
         modal.show();
-
+        
     } catch (error) {
         console.error('显示权益弹窗失败:', error);
         showToast('获取权益信息失败', 'danger');
@@ -21330,24 +20977,24 @@ function startCaptchaSessionMonitor() {
         console.log('⚠️ 会话监控已在运行中');
         return; // 已经在监控中
     }
-
+    
     console.log('🔍 开始监控验证会话...');
-
+    
     let checkCount = 0;
     captchaSessionMonitor = setInterval(async () => {
         try {
             checkCount++;
             const response = await fetch('/api/captcha/sessions');
             const data = await response.json();
-
+            
             // 每10次检查输出一次日志
             if (checkCount % 10 === 0) {
                 console.log(`🔍 监控检查 #${checkCount}: 活跃会话数=${data.count || 0}`);
             }
-
+            
             if (data.sessions && data.sessions.length > 0) {
                 console.log('📋 当前活跃会话:', data.sessions);
-
+                
                 for (const session of data.sessions) {
                     // 如果会话已完成或不存在，从监控列表中移除
                     if (session.completed || !session.has_websocket) {
@@ -21357,19 +21004,19 @@ function startCaptchaSessionMonitor() {
                         }
                         continue;
                     }
-
+                    
                     // 如果发现新的会话（未完成且未被监控），立即弹出窗口
                     if (!monitoredSessions.has(session.session_id)) {
                         console.log(`✨ 检测到新的验证会话: ${session.session_id}`);
                         monitoredSessions.add(session.session_id);
-
+                        
                         // 自动弹出验证窗口
                         showCaptchaVerificationModal(session.session_id);
                         showToast('🎨 检测到滑块验证，请完成验证', 'warning');
                     }
                 }
             }
-
+            
             // 如果没有活跃会话且没有监控中的会话，停止监控
             if ((!data.sessions || data.sessions.length === 0) && monitoredSessions.size === 0) {
                 console.log('✅ 没有活跃会话且没有监控中的会话，停止全局监控');
@@ -21379,7 +21026,7 @@ function startCaptchaSessionMonitor() {
             console.error('监控验证会话失败:', error);
         }
     }, 1000); // 每秒检查一次
-
+    
     console.log('✅ 会话监控已启动');
 }
 
@@ -21427,50 +21074,50 @@ function showCaptchaVerificationModal(sessionId = 'default') {
         console.log('已有活跃的验证窗口，不重复弹出');
         return activeCaptchaModal;
     }
-
+    
     const modal = new bootstrap.Modal(document.getElementById('captchaVerifyModal'), {
         backdrop: 'static',
         keyboard: false
     });
     const iframe = document.getElementById('captchaIframe');
     const loadingIndicator = document.getElementById('captchaLoadingIndicator');
-
+    
     // 获取服务器地址
     const serverUrl = window.location.origin;
-
+    
     // 重置 iframe
     iframe.style.display = 'none';
     loadingIndicator.style.display = 'block';
-
+    
     // 设置 iframe 源（嵌入模式）
     iframe.src = `${serverUrl}/api/captcha/control/${sessionId}?embed=1`;
-
+    
     // iframe 加载完成后隐藏加载指示器
     iframe.onload = function() {
         loadingIndicator.style.display = 'none';
         iframe.style.display = 'block';
     };
-
+    
     // 显示模态框
     modal.show();
     activeCaptchaModal = modal;
-
+    
     // 自动启动验证完成监控
     startCheckCaptchaCompletion(modal, sessionId);
-
+    
     // 监听模态框关闭事件
     document.getElementById('captchaVerifyModal').addEventListener('hidden.bs.modal', () => {
         activeCaptchaModal = null;
         // 从监控列表中移除
         monitoredSessions.delete(sessionId);
-
+        
         // 如果没有其他监控中的会话，停止全局监控
         if (monitoredSessions.size === 0) {
             stopCaptchaSessionMonitor();
             console.log('✅ 弹窗关闭，已停止全局监控');
         }
     }, { once: true });
-
+    
     // 返回 modal 实例用于后续控制
     return modal;
 }
@@ -21479,38 +21126,38 @@ function showCaptchaVerificationModal(sessionId = 'default') {
 function startCheckCaptchaCompletion(modal, sessionId) {
     let checkInterval = null;
     let isClosed = false;
-
+    
     const closeModal = () => {
         if (isClosed) return;
         isClosed = true;
-
+        
         if (checkInterval) {
             clearInterval(checkInterval);
             checkInterval = null;
         }
-
+        
         // 从监控列表中移除
         monitoredSessions.delete(sessionId);
-
+        
         // 如果没有其他监控中的会话，停止全局监控
         if (monitoredSessions.size === 0) {
             stopCaptchaSessionMonitor();
             console.log('✅ 所有验证已完成，已停止全局监控');
         }
-
+        
         modal.hide();
         activeCaptchaModal = null;
         showToast('✅ 滑块验证成功！', 'success');
         console.log(`✅ 验证完成: ${sessionId}`);
     };
-
+    
     checkInterval = setInterval(async () => {
         try {
             const response = await fetch(`/api/captcha/status/${sessionId}`);
             const data = await response.json();
-
+            
             console.log(`检查验证状态: ${sessionId}`, data);
-
+            
             // 如果验证完成，或者会话不存在（已关闭），都视为完成
             if (data.completed || (data.session_exists === false && data.success)) {
                 closeModal();
@@ -21524,7 +21171,7 @@ function startCheckCaptchaCompletion(modal, sessionId) {
             }
         }
     }, 1000); // 每秒检查一次
-
+    
     // 5分钟超时
     setTimeout(() => {
         if (!isClosed && checkInterval) {
@@ -21537,7 +21184,7 @@ function startCheckCaptchaCompletion(modal, sessionId) {
             }
         }
     }, 300000);
-
+    
     // 模态框关闭时停止检查
     document.getElementById('captchaVerifyModal').addEventListener('hidden.bs.modal', () => {
         if (checkInterval) {
@@ -21555,7 +21202,7 @@ async function checkCaptchaCompletion(modal, sessionId) {
             try {
                 const response = await fetch(`/api/captcha/status/${sessionId}`);
                 const data = await response.json();
-
+                
                 if (data.completed) {
                     clearInterval(checkInterval);
                     resolve(true);
@@ -21564,12 +21211,12 @@ async function checkCaptchaCompletion(modal, sessionId) {
                 console.error('检查验证状态失败:', error);
             }
         }, 1000);
-
+        
         setTimeout(() => {
             clearInterval(checkInterval);
             reject(new Error('验证超时'));
         }, 300000);
-
+        
         document.getElementById('captchaVerifyModal').addEventListener('hidden.bs.modal', () => {
             clearInterval(checkInterval);
         }, { once: true });
@@ -21582,30 +21229,30 @@ async function checkCaptchaCompletion(modal, sessionId) {
 async function showFaceVerification(accountId) {
     try {
         toggleLoading(true);
-
+        
         // 获取该账号的验证截图
         const response = await fetch(`${apiBase}/face-verification/screenshot/${accountId}`, {
             headers: {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         if (!response.ok) {
             throw new Error('获取验证截图失败');
         }
-
+        
         const data = await response.json();
-
+        
         toggleLoading(false);
-
+        
         if (!data.success) {
             showToast(data.message || '未找到验证截图', 'warning');
             return;
         }
-
+        
         // 使用与密码登录相同的弹窗显示验证截图
         showAccountFaceVerificationModal(accountId, data.screenshot);
-
+        
     } catch (error) {
         toggleLoading(false);
         console.error('获取验证截图失败:', error);
@@ -21621,43 +21268,43 @@ function showAccountFaceVerificationModal(accountId, screenshot) {
         createPasswordLoginQRModal();
         modal = document.getElementById('passwordLoginQRModal');
     }
-
+    
     // 更新模态框标题
     const modalTitle = document.getElementById('passwordLoginQRModalLabel');
     if (modalTitle) {
         modalTitle.innerHTML = `<i class="bi bi-shield-exclamation text-warning me-2"></i>账号验证 - 账号 ${accountId}`;
     }
-
+    
     // 显示截图
     const screenshotImg = document.getElementById('passwordLoginScreenshotImg');
     const linkButton = document.getElementById('passwordLoginVerificationLink');
     const statusText = document.getElementById('passwordLoginQRStatusText');
-
+    
     if (screenshotImg) {
         screenshotImg.src = `${screenshot.path}?t=${new Date().getTime()}`;
         screenshotImg.style.display = 'block';
         screenshotImg.alt = '验证截图';
     }
-
+    
     // 隐藏链接按钮
     if (linkButton) {
         linkButton.style.display = 'none';
     }
-
+    
     // 更新状态文本
     if (statusText) {
         statusText.innerHTML = `请根据下方验证截图在手机闲鱼APP中完成验证<br><small class="text-muted">创建时间: ${screenshot.created_time_str}</small>`;
     }
-
+    
     // 获取或创建模态框实例
     let modalInstance = bootstrap.Modal.getInstance(modal);
     if (!modalInstance) {
         modalInstance = new bootstrap.Modal(modal);
     }
-
+    
     // 显示弹窗
     modalInstance.show();
-
+    
     // 注意：截图删除由后端在验证完成或失败时自动处理，前端不需要手动删除
 }
 
@@ -21669,10 +21316,10 @@ function showAccountFaceVerificationModal(accountId, screenshot) {
 async function showVersionInfo(version) {
     // 尝试获取远程版本信息
     const versionInfo = await getUpdateInfo();
-
+    
     // 构建项目介绍
     const intro = versionInfo?.intro || '此版本为本人利用业余时间开发，功能可能不完善，欢迎大家提出建议和bug，我会尽快修复。此版本纯粹免费，没有任何收费项目，请大家放心使用。如果大家觉得这个项目对你有帮助，可以请我喝杯咖啡，支持我继续开发。';
-
+    
     // 构建版本历史
     let versionHistoryHtml = '';
     if (versionInfo?.versionHistory && versionInfo.versionHistory.length > 0) {
@@ -21681,7 +21328,7 @@ async function showVersionInfo(version) {
             const bgClass = isLatest ? 'background: linear-gradient(135deg, #e8f5e9, #c8e6c9);' : 'background: #f8f9fa;';
             const borderColor = isLatest ? 'border-left: 4px solid #28a745;' : 'border-left: 4px solid #dee2e6;';
             const badgeStyle = isLatest ? 'background: linear-gradient(135deg, #28a745, #20c997); color: #fff;' : 'background: #6c757d; color: #fff;';
-
+            
             return `
                 <div class="mb-3 p-3 rounded-3" style="${bgClass} ${borderColor}">
                     <div class="d-flex align-items-center justify-content-between mb-2">
@@ -21713,7 +21360,7 @@ async function showVersionInfo(version) {
             </div>
         `;
     }
-
+    
     const modalHtml = `
         <div class="modal fade" id="versionInfoModal" tabindex="-1">
             <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
@@ -21732,7 +21379,7 @@ async function showVersionInfo(version) {
                                 <h4 class="mb-0" style="color: #5a67d8; font-size: 24px;">${version}</h4>
                             </div>
                         </div>
-
+                        
                         <!-- 版本介绍 -->
                         <div class="mb-4">
                             <h6 style="color: #444; font-size: 16px; font-weight: 600;"><i class="bi bi-star me-2"></i>版本介绍</h6>
@@ -21743,7 +21390,7 @@ async function showVersionInfo(version) {
                                 </div>
                             </div>
                         </div>
-
+                        
                         <!-- 更新日志 -->
                         <div class="mb-3">
                             <h6 style="color: #444; font-size: 16px; font-weight: 600;"><i class="bi bi-clock-history me-2"></i>更新日志</h6>
@@ -21751,7 +21398,7 @@ async function showVersionInfo(version) {
                                 ${versionHistoryHtml}
                             </div>
                         </div>
-
+                        
                         <!-- 页脚 -->
                         <div class="text-center mt-4">
                             <small style="color: #888; font-size: 14px;">
@@ -21805,14 +21452,14 @@ async function checkHotUpdate() {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         if (!response.ok) {
             console.warn('热更新检查请求失败:', response.status);
             return null;
         }
-
+        
         const result = await response.json();
-
+        
         if (!result.success) {
             console.warn('热更新检查返回错误:', result.message);
             return null;
@@ -21821,9 +21468,9 @@ async function checkHotUpdate() {
         if (result.data) {
             remoteVersionInfo = result.data;
         }
-
+        
         return result.data;
-
+        
     } catch (error) {
         console.error('热更新检查失败:', error);
         return null;
@@ -21836,26 +21483,26 @@ async function checkHotUpdate() {
  */
 async function performHotUpdate() {
     setHotUpdateButtonsLoading();
-
+    
     try {
         // 先检查是否有更新
         const checkResult = await checkHotUpdate();
-
+        
         if (!checkResult) {
             showToast('检查更新失败，请稍后重试', 'danger');
             resetHotUpdateBtn();
             return;
         }
-
+        
         if (!checkResult.has_update) {
             showToast('已是最新版本，无需更新', 'info');
             resetHotUpdateBtn();
             return;
         }
-
+        
         // 显示确认对话框
         const dialogAction = await showHotUpdateConfirmDialog(checkResult);
-
+        
         if (dialogAction !== 'confirm') {
             if (dialogAction === 'ignore') {
                 const ignoredVersion = getHotUpdateTargetVersion(checkResult);
@@ -21867,10 +21514,10 @@ async function performHotUpdate() {
             resetHotUpdateBtn();
             return;
         }
-
+        
         // 显示更新进度
         showHotUpdateProgress();
-
+        
         // 执行更新
         const response = await fetch('/api/update/apply', {
             method: 'POST',
@@ -21880,25 +21527,25 @@ async function performHotUpdate() {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         const result = await response.json();
-
+        
         // 关闭进度弹窗
         closeHotUpdateProgress();
-
+        
         if (result.success && result.data.success) {
             // 更新成功
             const updateData = result.data;
             const updatedCount = updateData.updated_files?.length || 0;
             const deletedCount = updateData.deleted_files?.length || 0;
-
+            
             if (updateData.needs_restart) {
                 // 需要重启
                 showHotUpdateRestartDialog(updateData);
             } else {
                 // 不需要重启，刷新页面即可
                 showToast(`更新成功！更新 ${updatedCount} 个文件，删除 ${deletedCount} 个旧文件`, 'success');
-
+                
                 // 3秒后刷新页面
                 setTimeout(() => {
                     window.location.reload();
@@ -21907,7 +21554,7 @@ async function performHotUpdate() {
         } else {
             showToast('更新失败: ' + (result.detail || result.message || result.data?.message || '未知错误'), 'danger');
         }
-
+        
     } catch (error) {
         console.error('热更新执行失败:', error);
         showToast('更新失败: ' + error.message, 'danger');
@@ -21961,7 +21608,7 @@ async function showHotUpdateConfirmDialog(updateInfo) {
         const deletedFilesInfo = updateInfo.deleted_files && updateInfo.deleted_files.length > 0
             ? updateInfo.deleted_files.map(f => `<li><code>${f.path}</code> ${f.requires_restart ? '<span class="badge bg-warning">需重启</span>' : ''}</li>`).join('')
             : '';
-
+        
         const totalSizeKB = (updateInfo.total_size / 1024).toFixed(2);
         const deletedCount = updateInfo.deleted_files_count || 0;
         const deleteSection = deletedCount > 0 ? `
@@ -21976,7 +21623,7 @@ async function showHotUpdateConfirmDialog(updateInfo) {
                                 </div>
                             </div>
         ` : '';
-
+        
         const modalHtml = `
             <div class="modal fade" id="hotUpdateConfirmModal" tabindex="-1">
                 <div class="modal-dialog modal-dialog-centered">
@@ -21999,7 +21646,7 @@ async function showHotUpdateConfirmDialog(updateInfo) {
                                     <div style="font-size: 18px; font-weight: 600; color: #28a745;">${updateInfo.new_version}</div>
                                 </div>
                             </div>
-
+                            
                             <div class="mb-3 p-3 rounded-3" style="background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.06);">
                                 <div class="d-flex justify-content-between align-items-center mb-2">
                                     <span style="color: #666;"><i class="bi bi-files me-1"></i>更新文件数</span>
@@ -22014,7 +21661,7 @@ async function showHotUpdateConfirmDialog(updateInfo) {
                                     <span style="font-weight: 600; color: #333;">${totalSizeKB} KB</span>
                                 </div>
                             </div>
-
+                            
                             <div class="mb-3">
                                 <div style="color: #444; font-size: 14px; font-weight: 600; margin-bottom: 8px;">
                                     <i class="bi bi-list-check me-1"></i>将更新以下文件：
@@ -22026,7 +21673,7 @@ async function showHotUpdateConfirmDialog(updateInfo) {
                                 </div>
                             </div>
                             ${deleteSection}
-
+                            
                             <div class="rounded-3 p-3" style="background: linear-gradient(135deg, #fff3cd, #ffeeba); color: #856404; font-size: 14px;">
                                 <i class="bi bi-exclamation-triangle me-2"></i>
                                 <strong>提示：</strong>更新和删除前都会自动备份原文件，如遇问题可恢复。
@@ -22047,15 +21694,15 @@ async function showHotUpdateConfirmDialog(updateInfo) {
                 </div>
             </div>
         `;
-
+        
         // 移除已存在的模态框
         const existingModal = document.getElementById('hotUpdateConfirmModal');
         if (existingModal) {
             existingModal.remove();
         }
-
+        
         document.body.insertAdjacentHTML('beforeend', modalHtml);
-
+        
         const modalElement = document.getElementById('hotUpdateConfirmModal');
         const modal = new bootstrap.Modal(modalElement);
         let resolved = false;
@@ -22066,12 +21713,12 @@ async function showHotUpdateConfirmDialog(updateInfo) {
             modal.hide();
             resolve(action);
         };
-
+        
         // 绑定按钮事件
         document.getElementById('hotUpdateConfirmBtn').onclick = () => {
             finish('confirm');
         };
-
+        
         document.getElementById('hotUpdateCancelBtn').onclick = () => {
             finish('skip');
         };
@@ -22079,7 +21726,7 @@ async function showHotUpdateConfirmDialog(updateInfo) {
         document.getElementById('hotUpdateIgnoreBtn').onclick = () => {
             finish('ignore');
         };
-
+        
         modalElement.addEventListener('hidden.bs.modal', () => {
             modalElement.remove();
             if (!resolved) {
@@ -22087,7 +21734,7 @@ async function showHotUpdateConfirmDialog(updateInfo) {
                 resolve('skip');
             }
         });
-
+        
         modal.show();
     });
 }
@@ -22111,15 +21758,15 @@ function showHotUpdateProgress() {
             </div>
         </div>
     `;
-
+    
     // 移除已存在的模态框
     const existingModal = document.getElementById('hotUpdateProgressModal');
     if (existingModal) {
         existingModal.remove();
     }
-
+    
     document.body.insertAdjacentHTML('beforeend', modalHtml);
-
+    
     const modal = new bootstrap.Modal(document.getElementById('hotUpdateProgressModal'));
     modal.show();
 }
@@ -22156,7 +21803,7 @@ function showHotUpdateRestartDialog(updateData) {
                         <div class="text-center mb-4">
                             <i class="bi bi-check-circle-fill" style="font-size: 64px; color: #28a745;"></i>
                         </div>
-
+                        
                         <div class="mb-3 p-3 rounded-3" style="background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.06);">
                             <p style="color: #333; font-size: 16px; margin-bottom: 8px;">
                                 <strong>更新成功！</strong>
@@ -22165,7 +21812,7 @@ function showHotUpdateRestartDialog(updateData) {
                                 共更新 <strong>${updateData.updated_files.length}</strong> 个文件到版本 <strong>${updateData.new_version}</strong>
                             </p>
                         </div>
-
+                        
                         <div class="rounded-3 p-3" style="background: linear-gradient(135deg, #fff3cd, #ffeeba); color: #856404; font-size: 14px;">
                             <i class="bi bi-exclamation-triangle me-2"></i>
                             <strong>注意：</strong>部分更新的文件需要重启应用才能生效。
@@ -22183,15 +21830,15 @@ function showHotUpdateRestartDialog(updateData) {
             </div>
         </div>
     `;
-
+    
     // 移除已存在的模态框
     const existingModal = document.getElementById('hotUpdateRestartModal');
     if (existingModal) {
         existingModal.remove();
     }
-
+    
     document.body.insertAdjacentHTML('beforeend', modalHtml);
-
+    
     const modal = new bootstrap.Modal(document.getElementById('hotUpdateRestartModal'));
     modal.show();
 }
@@ -22202,7 +21849,7 @@ function showHotUpdateRestartDialog(updateData) {
 async function restartApplication() {
     try {
         showToast('正在重启应用...', 'info');
-
+        
         const response = await fetch('/api/update/restart', {
             method: 'POST',
             headers: {
@@ -22211,12 +21858,12 @@ async function restartApplication() {
                 'Authorization': `Bearer ${authToken}`
             }
         });
-
+        
         const result = await response.json();
-
+        
         if (result.success) {
             showToast('应用正在重启，页面将在5秒后自动刷新...', 'success');
-
+            
             // 5秒后刷新页面
             setTimeout(() => {
                 window.location.reload();
@@ -22224,7 +21871,7 @@ async function restartApplication() {
         } else {
             showToast('重启失败: ' + result.message, 'danger');
         }
-
+        
     } catch (error) {
         console.error('重启应用失败:', error);
         showToast('重启失败: ' + error.message, 'danger');
@@ -22252,6 +21899,13 @@ let chatCurrentToUserId = '';
 let chatCurrentSenderName = '';
 let chatCurrentItemId = '';
 let chatSessionsCache = [];
+let chatAccountsCache = [];
+let chatCurrentAccount = null;
+let chatSessionsNextCursor = null;
+let chatSessionsHasMore = false;
+let chatMessagesNextCursor = null;
+let chatMessagesHasMore = false;
+let chatMessagesSource = 'remote_im';
 let chatOldestMsgId = null;
 let chatSseAbortController = null;
 let chatSseRetryCount = 0;
@@ -22351,6 +22005,15 @@ function mergeChatSessionLists(primarySessions, secondarySessions) {
     return sortChatSessions(merged);
 }
 
+function getChatAccountStatus(account) {
+    const state = account?.connection_state || 'not_running';
+    if (!account?.enabled) return { label: '已断开', className: 'offline' };
+    if (account?.connected) return { label: '已连接', className: 'online' };
+    if (state === 'connecting' || state === 'reconnecting') return { label: '连接中', className: 'pending' };
+    if (account?.running) return { label: '运行中', className: 'pending' };
+    return { label: '未连接', className: 'offline' };
+}
+
 async function refreshChatAccounts() {
     const body = document.getElementById('chatAccountsBody');
     if (!body) return;
@@ -22362,16 +22025,34 @@ async function refreshChatAccounts() {
             return;
         }
         const accounts = result.accounts || [];
+        chatAccountsCache = accounts;
+        chatCurrentAccount = accounts.find(account => account.id === chatCurrentCookieId) || null;
         if (!accounts.length) {
             body.innerHTML = '<div class="text-center text-muted py-4 small">暂无可用账号</div>';
             return;
         }
         body.innerHTML = '';
         accounts.forEach(account => {
+            const status = getChatAccountStatus(account);
+            const actionLabel = account.enabled && (account.running || account.connected) ? '断开' : '连接';
+            const actionIcon = actionLabel === '断开' ? 'bi-plug' : 'bi-play-circle';
             const div = document.createElement('div');
             div.className = 'chat-account-item' + (account.id === chatCurrentCookieId ? ' active' : '');
-            div.innerHTML = `<div class="chat-account-dot ${account.connected ? 'online' : 'offline'}"></div><div class="chat-account-name" title="${escapeHtml(account.id)}">${escapeHtml(account.name || account.id)}</div>`;
+            div.innerHTML = `
+                <div class="chat-account-dot ${status.className}"></div>
+                <div class="chat-account-main">
+                    <div class="chat-account-name" title="${escapeHtml(account.id)}">${escapeHtml(account.name || account.id)}</div>
+                    <div class="chat-account-status ${status.className}" title="${escapeHtml(account.message_stream_note || '')}">${escapeHtml(status.label)}</div>
+                </div>
+                <button class="chat-account-action" title="${escapeHtml(actionLabel)}">
+                    <i class="bi ${actionIcon}"></i>
+                </button>
+            `;
             div.onclick = () => selectChatAccount(account.id);
+            div.querySelector('.chat-account-action')?.addEventListener('click', event => {
+                event.stopPropagation();
+                toggleChatAccountConnection(account.id, actionLabel === '断开');
+            });
             body.appendChild(div);
         });
     } catch (error) {
@@ -22380,12 +22061,36 @@ async function refreshChatAccounts() {
     }
 }
 
+async function toggleChatAccountConnection(cookieId, disconnect = false) {
+    try {
+        const endpoint = disconnect ? 'disconnect' : 'connect';
+        const result = await fetchJSON(`${apiBase}/api/chat/${endpoint}/${encodeURIComponent(cookieId)}`, { method: 'POST' });
+        if (result.success) {
+            showToast(result.message || (disconnect ? '已断开连接' : '连接已启动'), 'success');
+        } else {
+            showToast(result.detail || result.message || '操作失败', 'danger');
+        }
+    } catch (error) {
+        console.error('切换客服连接失败:', error);
+        showToast(disconnect ? '断开失败' : '连接失败', 'danger');
+    }
+    await refreshChatAccounts();
+    if (cookieId === chatCurrentCookieId) {
+        await refreshChatSessions();
+    }
+}
+
 async function selectChatAccount(cookieId) {
     chatCurrentCookieId = cookieId;
+    chatCurrentAccount = chatAccountsCache.find(account => account.id === cookieId) || null;
     chatCurrentChatId = '';
     chatCurrentToUserId = '';
     chatCurrentSenderName = '';
     chatCurrentItemId = '';
+    chatSessionsNextCursor = null;
+    chatSessionsHasMore = false;
+    chatMessagesNextCursor = null;
+    chatMessagesHasMore = false;
     chatOldestMsgId = null;
     const placeholder = document.getElementById('chatMainPlaceholder');
     const active = document.getElementById('chatActiveArea');
@@ -22396,7 +22101,7 @@ async function selectChatAccount(cookieId) {
     await refreshChatSessions();
 }
 
-async function refreshChatSessions() {
+async function refreshChatSessions(append = false) {
     const body = document.getElementById('chatSessionsBody');
     if (!body) return;
     if (!chatCurrentCookieId) {
@@ -22404,25 +22109,43 @@ async function refreshChatSessions() {
         chatSessionsCache = [];
         return;
     }
-    body.innerHTML = '<div class="text-center text-muted py-4 small"><div class="spinner-border spinner-border-sm"></div></div>';
+    if (!append) {
+        chatSessionsNextCursor = null;
+        chatSessionsHasMore = false;
+        body.innerHTML = '<div class="text-center text-muted py-4 small"><div class="spinner-border spinner-border-sm"></div></div>';
+    }
     try {
-        const result = await fetchJSON(`${apiBase}/api/chat/sessions?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&include_order_fallback=true&limit=120`);
+        let url = `${apiBase}/api/chat/sessions?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&include_order_fallback=true&remote=true&limit=60`;
+        if (append && chatSessionsNextCursor) {
+            url += `&cursor=${encodeURIComponent(chatSessionsNextCursor)}`;
+        }
+        const result = await fetchJSON(url);
         if (!result.success) {
             body.innerHTML = '<div class="text-center text-muted py-4 small">加载失败</div>';
             return;
         }
-        chatSessionsCache = sortChatSessions(result.sessions || []);
-        chatSessionsCache = await enrichSessionsWithOrdersFallback(chatSessionsCache);
+        chatSessionsNextCursor = result.next_cursor || null;
+        chatSessionsHasMore = Boolean(result.has_more && chatSessionsNextCursor);
+        const incomingSessions = sortChatSessions(result.sessions || []);
+        chatSessionsCache = append ? mergeChatSessionLists(chatSessionsCache, incomingSessions) : incomingSessions;
+        if (!append && result.remote_error) {
+            console.debug('直连IM会话提示:', result.remote_error);
+        }
         if (!chatSessionsCache.length) {
-            body.innerHTML = '<div class="text-center text-muted py-4 small">暂无会话记录；若该账号已有订单，会自动显示可补拉历史的会话入口</div>';
+            const hint = result.remote_error || '暂无会话记录';
+            body.innerHTML = `<div class="text-center text-muted py-4 small">${escapeHtml(hint)}</div>`;
             return;
         }
         renderChatSessions(chatSessionsCache);
-        mergeHydrationFallbackSessions();
     } catch (error) {
         console.error('获取会话列表失败:', error);
         body.innerHTML = '<div class="text-center text-muted py-4 small">加载失败</div>';
     }
+}
+
+function loadMoreChatSessions() {
+    if (!chatSessionsHasMore || !chatSessionsNextCursor) return;
+    refreshChatSessions(true);
 }
 
 function buildChatSessionsFromOrdersData(orders, cookieId) {
@@ -22483,21 +22206,35 @@ function renderChatSessions(sessions) {
         const displayName = resolveSessionDisplayName(session);
         const avatar = resolveSessionAvatar(session);
         const sessionState = getChatSessionState(session);
-        const preview = String(sessionState.preview || resolveSessionPreview(session)).substring(0, 30);
-        const baseSubMeta = String(sessionState.submeta || '').trim();
+        const preview = String(sessionState.preview || resolveSessionPreview(session)).substring(0, 42);
+        const baseSubMeta = String(sessionState.submeta || session.item_title || '').trim();
         const priceMeta = session.item_price ? `<span class="chat-session-price">￥${escapeHtml(String(session.item_price))}</span>` : '';
+        const unread = Number(session.unread_count || 0);
+        const sourceTag = session.source === 'remote_im' ? '<span class="chat-session-source">IM</span>' : '';
         div.innerHTML = `
             <div class="chat-session-avatar">${avatar.type === 'image' ? `<img src="${escapeHtml(avatar.value)}" alt="avatar" class="chat-session-avatar-image">` : escapeHtml(avatar.value)}</div>
             <div class="chat-session-info">
-                <div class="chat-session-name">${escapeHtml(displayName)}</div>
+                <div class="chat-session-title-row">
+                    <div class="chat-session-name">${escapeHtml(displayName)}</div>
+                    ${sourceTag}
+                    ${unread > 0 ? `<span class="chat-session-unread">${unread > 99 ? '99+' : unread}</span>` : ''}
+                </div>
                 <div class="chat-session-preview">${escapeHtml(preview)}</div>
                 <div class="chat-session-submeta">${escapeHtml(baseSubMeta)}${priceMeta}</div>
             </div>
-            <div class="chat-session-time">${escapeHtml(formatChatTime(session.created_at))}</div>
+            <div class="chat-session-time">${escapeHtml(formatChatTime(session.created_at || session.lastMessageTime))}</div>
         `;
         div.onclick = () => selectChatSession(session);
         body.appendChild(div);
     });
+    if (chatSessionsHasMore) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'chat-load-more-btn';
+        more.innerHTML = '<i class="bi bi-chevron-down"></i><span>加载更多会话</span>';
+        more.onclick = loadMoreChatSessions;
+        body.appendChild(more);
+    }
 }
 
 function mergeHydrationFallbackSessions() {
@@ -22535,20 +22272,27 @@ function filterChatSessions() {
         renderChatSessions(sortChatSessions(chatSessionsCache));
         return;
     }
+    const hasMoreBeforeFilter = chatSessionsHasMore;
+    chatSessionsHasMore = false;
     renderChatSessions(sortChatSessions(chatSessionsCache.filter(session =>
         String(session.sender_name || '').toLowerCase().includes(keyword)
         || String(session.buyer_name || '').toLowerCase().includes(keyword)
+        || String(session.item_title || '').toLowerCase().includes(keyword)
         || String(session.chat_id || '').includes(keyword)
         || String(normalizeChatSessionPreview(session.content, session.content_type) || '').toLowerCase().includes(keyword)
     )));
+    chatSessionsHasMore = hasMoreBeforeFilter;
 }
 
 async function selectChatSession(session) {
     session = { ...session, content: normalizeChatSessionPreview(session?.content, session?.content_type) };
     chatCurrentChatId = session.chat_id;
-    chatCurrentToUserId = session.buyer_id || (session.direction === 2 ? (session.sender_id || '') : '');
+    chatCurrentToUserId = session.buyer_id || session.sender_id || '';
     chatCurrentSenderName = resolveSessionDisplayName(session);
     chatCurrentItemId = session.item_id || '';
+    chatMessagesNextCursor = null;
+    chatMessagesHasMore = false;
+    chatMessagesSource = 'remote_im';
     chatOldestMsgId = null;
 
     const placeholder = document.getElementById('chatMainPlaceholder');
@@ -22562,30 +22306,6 @@ async function selectChatSession(session) {
 
     renderChatSessions(chatSessionsCache);
     await loadChatMessages(false);
-
-    try {
-        const result = await fetchJSON(`${apiBase}/api/chat/messages?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&chat_id=${encodeURIComponent(chatCurrentChatId)}&limit=50`);
-        if (result.success && Array.isArray(result.messages)) {
-            const buyerMessage = result.messages.find(message => message.direction === 2);
-            if (buyerMessage) {
-                if (!chatCurrentToUserId) chatCurrentToUserId = buyerMessage.sender_id;
-                if (!chatCurrentSenderName || chatCurrentSenderName === chatCurrentChatId) {
-                    chatCurrentSenderName = buyerMessage.sender_name || buyerMessage.sender_id || chatCurrentChatId;
-                    if (headerName) headerName.textContent = chatCurrentSenderName;
-                }
-            }
-            const messageWithItem = [...result.messages].reverse().find(message => {
-                const itemId = String(message.item_id || '');
-                return itemId && itemId !== 'None' && !itemId.startsWith('auto_');
-            });
-            if (messageWithItem) {
-                chatCurrentItemId = messageWithItem.item_id;
-                updateChatHeaderMeta({ ...session, item_id: chatCurrentItemId });
-            }
-        }
-    } catch (error) {
-        console.debug('补充会话信息失败:', error);
-    }
 
     if (!document.getElementById('chatReplyPanel')?.classList.contains('d-none') && chatCurrentItemId) {
         await loadItemKeywords();
@@ -22602,8 +22322,19 @@ function shouldRebuildEmptySession(messages) {
     return false;
 }
 
-function renderChatEmptyState(session) {
-    return `<div class="text-center text-muted py-4"><div class="small">暂无消息记录</div></div>`;
+function renderChatEmptyState(session, hint = '暂无消息记录') {
+    const title = session?.source === 'remote_im' ? hint : (hint || '暂无消息记录');
+    return `<div class="text-center text-muted py-4"><div class="small">${escapeHtml(title)}</div></div>`;
+}
+
+function updateChatMessagePaging(result, messages) {
+    chatMessagesSource = result.source || 'local_cache';
+    chatMessagesNextCursor = result.next_cursor || null;
+    chatMessagesHasMore = Boolean(result.has_more && chatMessagesNextCursor);
+    if (chatMessagesSource === 'local_cache' && messages.length > 0) {
+        chatOldestMsgId = messages[0].id;
+        chatMessagesHasMore = Boolean(result.has_more && chatOldestMsgId);
+    }
 }
 
 async function loadChatMessages(append = false) {
@@ -22611,13 +22342,28 @@ async function loadChatMessages(append = false) {
     const area = document.getElementById('chatMessagesArea');
     if (!area) return;
     if (!append) {
+        chatMessagesNextCursor = null;
+        chatMessagesHasMore = false;
+        chatOldestMsgId = null;
         area.innerHTML = '<div class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm"></div></div>';
     }
 
     try {
-        let url = `${apiBase}/api/chat/messages?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&chat_id=${encodeURIComponent(chatCurrentChatId)}&limit=50`;
-        if (append && chatOldestMsgId) {
-            url += `&before_id=${chatOldestMsgId}`;
+        let url = `${apiBase}/api/chat/messages?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&chat_id=${encodeURIComponent(chatCurrentChatId)}&limit=40`;
+        if (chatCurrentItemId) {
+            url += `&item_id=${encodeURIComponent(chatCurrentItemId)}`;
+        }
+        if (append) {
+            if (chatMessagesSource === 'remote_im' && chatMessagesNextCursor) {
+                url += `&remote=true&cursor=${encodeURIComponent(chatMessagesNextCursor)}`;
+            } else if (chatMessagesSource === 'local_cache' && chatOldestMsgId) {
+                url += `&remote=false&before_id=${encodeURIComponent(chatOldestMsgId)}`;
+            } else {
+                showToast('没有更多消息了', 'info');
+                return;
+            }
+        } else {
+            url += '&remote=true';
         }
         const result = await fetchJSON(url);
         if (!result.success) {
@@ -22625,19 +22371,39 @@ async function loadChatMessages(append = false) {
             return;
         }
         const messages = result.messages || [];
-        if (messages.length > 0) {
-            chatOldestMsgId = messages[0].id;
+        updateChatMessagePaging(result, messages);
+
+        const buyerMessage = messages.find(message => message.direction === 2);
+        if (buyerMessage && !chatCurrentToUserId) {
+            chatCurrentToUserId = buyerMessage.sender_id;
         }
+        const messageWithItem = [...messages].reverse().find(message => {
+            const itemId = String(message.item_id || '');
+            return itemId && itemId !== 'None' && !itemId.startsWith('auto_');
+        });
+        if (messageWithItem && !chatCurrentItemId) {
+            chatCurrentItemId = messageWithItem.item_id;
+            const currentSession = chatSessionsCache.find(item => item.chat_id === chatCurrentChatId) || {};
+            updateChatHeaderMeta({ ...currentSession, item_id: chatCurrentItemId });
+        }
+
         if (append) {
+            if (!messages.length) {
+                showToast('没有更多消息了', 'info');
+                return;
+            }
             const previousHeight = area.scrollHeight;
-            area.insertAdjacentHTML('afterbegin', renderChatMessages(messages));
+            area.querySelector('.chat-history-more')?.remove();
+            const moreButton = chatMessagesHasMore ? '<button type="button" class="chat-history-more" onclick="loadMoreChatMessages()"><i class="bi bi-clock-history"></i><span>加载更早消息</span></button>' : '';
+            area.insertAdjacentHTML('afterbegin', `${moreButton}${renderChatMessages(messages)}`);
             area.scrollTop = area.scrollHeight - previousHeight;
         } else {
             if (messages.length) {
-                area.innerHTML = renderChatMessages(messages);
+                const moreButton = chatMessagesHasMore ? '<button type="button" class="chat-history-more" onclick="loadMoreChatMessages()"><i class="bi bi-clock-history"></i><span>加载更早消息</span></button>' : '';
+                area.innerHTML = `${moreButton}${renderChatMessages(messages)}`;
             } else {
                 const currentSession = chatSessionsCache.find(item => item.chat_id === chatCurrentChatId) || {};
-                area.innerHTML = renderChatEmptyState(currentSession);
+                area.innerHTML = renderChatEmptyState(currentSession, result.remote_error || '暂无消息记录');
             }
             area.scrollTop = area.scrollHeight;
         }

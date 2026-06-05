@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>&#36890;&#30693;&#28192;&#36947;&#25195;&#30721;&#37197;&#32622;</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    body {
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+    .setup-shell {
+      max-width: 560px;
+      margin: 0 auto;
+      padding: 22px 14px 32px;
+    }
+    .setup-header {
+      padding: 22px 18px;
+      border-radius: 10px;
+      background: #14532d;
+      color: #fff;
+      box-shadow: 0 8px 22px rgba(20, 83, 45, 0.16);
+    }
+    .setup-card {
+      margin-top: 16px;
+      border: 0;
+      border-radius: 10px;
+      box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+    }
+    .form-label {
+      font-weight: 600;
+    }
+    .small-help {
+      color: #6b7280;
+      font-size: 0.86rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="setup-shell">
+    <section class="setup-header">
+      <div class="d-flex align-items-center gap-3">
+        <i class="bi bi-bell fs-2"></i>
+        <div>
+          <h1 class="h4 mb-1">&#36890;&#30693;&#28192;&#36947;&#37197;&#32622;</h1>
+          <div class="opacity-75">&#22635;&#20889;&#21518;&#20250;&#33258;&#21160;&#20445;&#23384;&#21040;&#38386;&#40060;&#31649;&#29702;&#21518;&#21488;</div>
+        </div>
+      </div>
+    </section>
+
+    <div id="setupStatus" class="alert alert-info setup-card mb-0">
+      &#27491;&#22312;&#26657;&#39564;&#37197;&#32622;&#38142;&#25509;...
+    </div>
+
+    <section id="setupFormCard" class="card setup-card d-none">
+      <div class="card-body">
+        <form id="setupForm">
+          <div class="mb-3">
+            <label for="channelType" class="form-label">&#36890;&#30693;&#28192;&#36947;</label>
+            <select id="channelType" class="form-select" required>
+              <option value="feishu">&#39134;&#20070;&#36890;&#30693;</option>
+              <option value="dingtalk">&#38025;&#38025;&#36890;&#30693;</option>
+              <option value="wechat">&#20225;&#19994;&#24494;&#20449;&#36890;&#30693;</option>
+              <option value="bark">Bark &#36890;&#30693;</option>
+              <option value="webhook">Webhook &#36890;&#30693;</option>
+            </select>
+          </div>
+
+          <div class="mb-3">
+            <label for="channelName" class="form-label">&#28192;&#36947;&#21517;&#31216;</label>
+            <input id="channelName" class="form-control" type="text" maxlength="60" placeholder="&#20363;&#22914;&#65306;&#25163;&#26426;&#39134;&#20070;&#36890;&#30693;">
+            <div class="small-help mt-1">&#19981;&#22635;&#20889;&#26102;&#20250;&#20351;&#29992;&#28192;&#36947;&#40664;&#35748;&#21517;&#31216;&#12290;</div>
+          </div>
+
+          <div id="dynamicFields"></div>
+
+          <div class="form-check form-switch mb-4">
+            <input class="form-check-input" type="checkbox" id="sendTest" checked>
+            <label class="form-check-label" for="sendTest">&#20445;&#23384;&#21518;&#21457;&#36865;&#19968;&#26465;&#27979;&#35797;&#36890;&#30693;</label>
+          </div>
+
+          <button id="submitBtn" type="submit" class="btn btn-success w-100">
+            <i class="bi bi-check-circle me-1"></i>&#20445;&#23384;&#36890;&#30693;&#28192;&#36947;
+          </button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const token = new URLSearchParams(window.location.search).get('token') || '';
+    const setupStatus = document.getElementById('setupStatus');
+    const setupFormCard = document.getElementById('setupFormCard');
+    const channelType = document.getElementById('channelType');
+    const dynamicFields = document.getElementById('dynamicFields');
+    const submitBtn = document.getElementById('submitBtn');
+
+    const text = {
+      missingToken: '\u914d\u7f6e\u94fe\u63a5\u7f3a\u5c11 token\uff0c\u8bf7\u91cd\u65b0\u5728\u540e\u53f0\u751f\u6210\u4e8c\u7ef4\u7801\u3002',
+      invalidToken: '\u914d\u7f6e\u94fe\u63a5\u4e0d\u5b58\u5728\u3001\u5df2\u8fc7\u671f\u6216\u5df2\u4f7f\u7528\uff0c\u8bf7\u56de\u5230\u540e\u53f0\u91cd\u65b0\u751f\u6210\u4e8c\u7ef4\u7801\u3002',
+      saving: '\u4fdd\u5b58\u4e2d...',
+      saveFailed: '\u4fdd\u5b58\u5931\u8d25',
+      saveRetry: '\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u914d\u7f6e\u540e\u91cd\u8bd5\u3002',
+      saveButton: '\u4fdd\u5b58\u901a\u77e5\u6e20\u9053',
+      saveSuccess: '\u901a\u77e5\u6e20\u9053\u5df2\u4fdd\u5b58\u6210\u529f\u3002',
+      testSent: '\u6d4b\u8bd5\u901a\u77e5\u5df2\u53d1\u9001\u3002',
+      testFailed: '\u6d4b\u8bd5\u901a\u77e5\u53d1\u9001\u5931\u8d25\uff0c\u4f46\u914d\u7f6e\u5df2\u4fdd\u5b58\u3002'
+    };
+
+    const fieldSets = {
+      feishu: [
+        { id: 'webhook_url', label: '\u98de\u4e66\u673a\u5668\u4eba Webhook URL', type: 'url', required: true, placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/...' },
+        { id: 'secret', label: '\u7b7e\u540d\u5bc6\u94a5\uff08\u53ef\u9009\uff09', type: 'password', required: false, placeholder: '\u98de\u4e66\u673a\u5668\u4eba\u5b89\u5168\u8bbe\u7f6e\u4e2d\u7684\u5bc6\u94a5' }
+      ],
+      dingtalk: [
+        { id: 'webhook_url', label: '\u9489\u9489\u673a\u5668\u4eba Webhook URL', type: 'url', required: true, placeholder: 'https://oapi.dingtalk.com/robot/send?access_token=...' },
+        { id: 'secret', label: '\u52a0\u7b7e\u5bc6\u94a5\uff08\u53ef\u9009\uff09', type: 'password', required: false, placeholder: 'SEC...' }
+      ],
+      wechat: [
+        { id: 'webhook_url', label: '\u4f01\u4e1a\u5fae\u4fe1\u673a\u5668\u4eba Webhook URL', type: 'url', required: true, placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...' }
+      ],
+      bark: [
+        { id: 'device_key', label: 'Bark \u8bbe\u5907\u5bc6\u94a5', type: 'text', required: true, placeholder: 'Bark App \u4e2d\u663e\u793a\u7684\u8bbe\u5907\u5bc6\u94a5' },
+        { id: 'server_url', label: 'Bark \u670d\u52a1\u5668\u5730\u5740\uff08\u53ef\u9009\uff09', type: 'url', required: false, placeholder: 'https://api.day.app' },
+        { id: 'title', label: '\u901a\u77e5\u6807\u9898\uff08\u53ef\u9009\uff09', type: 'text', required: false, placeholder: '\u95f2\u9c7c\u7ba1\u7406\u7cfb\u7edf\u901a\u77e5' },
+        { id: 'sound', label: '\u63d0\u793a\u97f3\uff08\u53ef\u9009\uff09', type: 'text', required: false, placeholder: 'default' },
+        { id: 'group', label: '\u5206\u7ec4\uff08\u53ef\u9009\uff09', type: 'text', required: false, placeholder: 'xianyu' }
+      ],
+      webhook: [
+        { id: 'webhook_url', label: 'Webhook URL', type: 'url', required: true, placeholder: 'https://your-server.com/webhook' },
+        { id: 'http_method', label: 'HTTP \u65b9\u6cd5', type: 'select', required: true, options: ['POST', 'PUT'] },
+        { id: 'headers', label: '\u81ea\u5b9a\u4e49\u8bf7\u6c42\u5934 JSON\uff08\u53ef\u9009\uff09', type: 'textarea', required: false, placeholder: '{"Authorization":"Bearer token"}' }
+      ]
+    };
+
+    function showStatus(type, message) {
+      setupStatus.className = `alert alert-${type} setup-card mb-0`;
+      setupStatus.textContent = message;
+      setupStatus.classList.remove('d-none');
+    }
+
+    function renderFields() {
+      const fields = fieldSets[channelType.value] || [];
+      dynamicFields.innerHTML = fields.map(field => {
+        const requiredMark = field.required ? '<span class="text-danger">*</span>' : '';
+        let control = '';
+        if (field.type === 'select') {
+          control = `<select class="form-select" id="${field.id}" ${field.required ? 'required' : ''}>${field.options.map(option => `<option value="${option}">${option}</option>`).join('')}</select>`;
+        } else if (field.type === 'textarea') {
+          control = `<textarea class="form-control" rows="3" id="${field.id}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''}></textarea>`;
+        } else {
+          control = `<input class="form-control" type="${field.type}" id="${field.id}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''}>`;
+        }
+        return `<div class="mb-3"><label class="form-label" for="${field.id}">${field.label} ${requiredMark}</label>${control}</div>`;
+      }).join('');
+    }
+
+    async function validateToken() {
+      if (!token) {
+        showStatus('danger', text.missingToken);
+        return;
+      }
+      try {
+        const response = await fetch(`/api/notification-channel-setup/${encodeURIComponent(token)}`);
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+        await response.json();
+        setupStatus.classList.add('d-none');
+        setupFormCard.classList.remove('d-none');
+        renderFields();
+      } catch (error) {
+        showStatus('danger', text.invalidToken);
+      }
+    }
+
+    document.getElementById('setupForm').addEventListener('submit', async event => {
+      event.preventDefault();
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${text.saving}`;
+
+      const fields = fieldSets[channelType.value] || [];
+      const config = {};
+      fields.forEach(field => {
+        const element = document.getElementById(field.id);
+        const value = element ? element.value.trim() : '';
+        if (value) {
+          config[field.id] = value;
+        }
+      });
+
+      try {
+        const response = await fetch('/api/notification-channel-setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token,
+            type: channelType.value,
+            name: document.getElementById('channelName').value.trim(),
+            config,
+            send_test: document.getElementById('sendTest').checked
+          })
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.detail || text.saveFailed);
+        }
+
+        setupFormCard.classList.add('d-none');
+        const testText = data.test_sent === true ? text.testSent : data.test_sent === false ? text.testFailed : '';
+        showStatus('success', `${text.saveSuccess}${testText}`);
+      } catch (error) {
+        showStatus('danger', error.message || text.saveRetry);
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = `<i class="bi bi-check-circle me-1"></i>${text.saveButton}`;
+      }
+    });
+
+    channelType.addEventListener('change', renderFields);
+    validateToken();
+  </script>
+</body>
+</html>
