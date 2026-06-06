@@ -81,6 +81,8 @@
 - **实时日志** - 完整的操作日志记录、查看和导出
 - **安全统计** - 支持登录封禁和锁定统计
 - **健康检查** - 服务状态健康检查
+- **系统健康总览** - 仪表盘聚合展示账号在线/离线、自动回复与任务状态、待处理验证码和最近异常
+- **管理员审计日志** - 记录用户管理、数据管理、热更新、重启、备份等高风险操作
 - **系统统计** - 支持用户、账号、卡券等数据统计
 
 ### 📁 数据管理
@@ -295,9 +297,11 @@ XIANYU_PUBLISH_SELECTOR_CONFIG=config/item_publish_selectors.json
   - Docker Compose 默认配置: http://localhost:9000
   - Docker Compose 国内配置: http://localhost:8000
   - 本地运行: http://localhost:8090
-- **默认管理员账号（首次初始化且未自定义密码时）**：
+- **默认管理员账号（首次初始化）**：
   - 用户名：`admin`
-  - 密码：`admin123`
+  - 密码来源优先级：
+    `ADMIN_INITIAL_PASSWORD` 环境变量
+    未配置时自动生成一次性随机密码，并写入数据目录下的 `initial_admin_password.txt`
 - **API文档**：
   - Docker Compose 默认配置: http://localhost:9000/docs
   - Docker Compose 国内配置: http://localhost:8000/docs
@@ -307,7 +311,7 @@ XIANYU_PUBLISH_SELECTOR_CONFIG=config/item_publish_selectors.json
   - Docker Compose 国内配置: http://localhost:8000/health
   - 本地运行: http://localhost:8090/health
 
-> ⚠️ **安全提示**：公网部署前必须设置强随机 `JWT_SECRET_KEY`，并在首次登录后立即修改默认 `admin/admin123` 密码！
+> ⚠️ **安全提示**：公网部署前必须设置强随机 `JWT_SECRET_KEY`，并显式配置 `ADMIN_INITIAL_PASSWORD`；若未配置，系统会生成一次性随机初始密码，请在首次登录后立即修改。QQ 回复消息等外部调用密钥必须在系统设置中配置，未配置时接口会拒绝调用，不再使用弱后备密钥。
 
 
 ## 📋 系统使用
@@ -406,6 +410,23 @@ XIANYU_PUBLISH_SELECTOR_CONFIG=config/item_publish_selectors.json
 - **实时日志**：Web界面查看实时系统日志
 - **日志文件**：`logs/` 目录下的按日期分割的日志文件
 - **日志级别**：支持DEBUG、INFO、WARNING、ERROR级别
+
+### 健康总览
+- **入口位置**：管理员登录后进入仪表盘，可查看“系统健康与任务状态”卡片。
+- **聚合内容**：账号在线/离线、自动回复状态、订单同步/定时任务状态、待处理验证码、Cookie/Token 疑似异常和最近失败任务。
+- **后端接口**：`GET /admin/health-summary`，需要管理员权限，后端一次性聚合数据，避免前端同时发起大量分散请求。
+
+### 管理员审计
+- **记录范围**：用户提权/删除、数据导出/删除/清空、备份下载/上传、热更新应用/清理/保存哈希、应用重启等高风险操作。
+- **记录字段**：操作者、动作、目标、时间、结果、IP 或请求来源、详细信息。
+- **查询方式**：管理员可通过 `GET /admin/audit-logs` 查询，支持 `actor_user_id`、`action`、`target_type`、`result`、`start_time`、`end_time`、`limit`、`offset` 筛选。
+
+### 验证命令
+```bash
+venv\Scripts\python.exe -m unittest tests.frontend_chrome_headless_smoke_unittest tests.frontend_http_smoke_unittest tests.reply_server_high_risk_auth_unittest tests.admin_health_summary_unittest tests.static_js_request_helper_unittest tests.admin_audit_log_unittest tests.admin_audit_helper_unittest tests.static_html_text_encoding_unittest tests.reply_server_api_key_unittest tests.reply_server_admin_auth_unittest tests.default_admin_password_unittest -v
+venv\Scripts\python.exe -m py_compile reply_server.py db_manager.py admin_health_summary.py tests/frontend_chrome_headless_smoke_unittest.py tests/frontend_http_smoke_unittest.py
+node --check static/js/app.js
+```
 
 ## 🤝 贡献指南
 

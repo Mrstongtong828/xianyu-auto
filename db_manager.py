@@ -5,6 +5,7 @@ import hashlib
 import time
 import json
 import random
+import secrets
 import string
 import re
 import aiohttp
@@ -824,6 +825,24 @@ class DBManager:
             )
             ''')
 
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_user_id INTEGER,
+                actor_username TEXT DEFAULT '',
+                action TEXT NOT NULL,
+                target_type TEXT DEFAULT '',
+                target_id TEXT DEFAULT '',
+                result TEXT DEFAULT 'success',
+                ip_address TEXT DEFAULT '',
+                details TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_actor ON admin_audit_logs(actor_user_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_action ON admin_audit_logs(action)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created_at ON admin_audit_logs(created_at)')
+
             # 创建好评模板表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS comment_templates (
@@ -1516,8 +1535,22 @@ Cookie数量: {cookie_count}
             admin_exists = cursor.fetchone()[0] > 0
 
             if not admin_exists:
-                # 首次创建admin用户，设置默认密码和管理员权限
-                default_password_hash = hashlib.sha256("admin123".encode()).hexdigest()
+                # 首次创建admin用户，使用环境变量或随机一次性密码。
+                initial_password = os.getenv('ADMIN_INITIAL_PASSWORD', '').strip()
+                if not initial_password:
+                    initial_password = secrets.token_urlsafe(24)
+                    password_file = os.path.join(os.path.dirname(self.db_path) or '.', 'initial_admin_password.txt')
+                    try:
+                        with open(password_file, 'w', encoding='utf-8') as f:
+                            f.write(initial_password + '\n')
+                        try:
+                            os.chmod(password_file, 0o600)
+                        except Exception:
+                            pass
+                        logger.warning(f"未配置 ADMIN_INITIAL_PASSWORD，已生成随机初始管理员密码并写入: {password_file}")
+                    except Exception as password_file_error:
+                        logger.error(f"写入初始管理员密码文件失败: {password_file_error}")
+                default_password_hash = hashlib.sha256(initial_password.encode()).hexdigest()
                 # 检查is_admin列是否存在
                 try:
                     cursor.execute('SELECT is_admin FROM users LIMIT 1')
@@ -6828,6 +6861,136 @@ Cookie数量: {cookie_count}
                 return False
 
     # ==================== 管理员专用方法 ====================
+
+    def record_admin_audit_log(
+        self,
+        actor_user_id: int = None,
+        actor_username: str = '',
+        action: str = '',
+        target_type: str = '',
+        target_id: str = '',
+        result: str = 'success',
+        ip_address: str = '',
+        details: Dict[str, Any] = None,
+    ) -> Optional[int]:
+        """记录管理员高风险操作审计日志。"""
+        if not action:
+            logger.warning("管理员审计日志缺少 action，已跳过")
+            return None
+
+        safe_details = details or {}
+        try:
+            details_json = json.dumps(safe_details, ensure_ascii=False, default=str)
+        except Exception:
+            details_json = json.dumps({"raw": str(safe_details)}, ensure_ascii=False)
+
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    '''
+                    INSERT INTO admin_audit_logs (
+                        actor_user_id, actor_username, action, target_type, target_id,
+                        result, ip_address, details
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        actor_user_id,
+                        actor_username or '',
+                        action,
+                        target_type or '',
+                        str(target_id or ''),
+                        result or 'success',
+                        ip_address or '',
+                        details_json,
+                    ),
+                )
+                self.conn.commit()
+                return cursor.lastrowid
+            except Exception as e:
+                logger.error(f"记录管理员审计日志失败: {e}")
+                self.conn.rollback()
+                return None
+
+    def get_admin_audit_logs(
+        self,
+        actor_user_id: int = None,
+        action: str = None,
+        target_type: str = None,
+        result: str = None,
+        start_time: str = None,
+        end_time: str = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """查询管理员审计日志，按创建时间倒序分页。"""
+        safe_limit = max(1, min(int(limit or 100), 500))
+        safe_offset = max(0, int(offset or 0))
+        where = []
+        params = []
+
+        if actor_user_id is not None:
+            where.append("actor_user_id = ?")
+            params.append(actor_user_id)
+        if action:
+            where.append("action = ?")
+            params.append(action)
+        if target_type:
+            where.append("target_type = ?")
+            params.append(target_type)
+        if result:
+            where.append("result = ?")
+            params.append(result)
+        if start_time:
+            where.append("datetime(created_at) >= datetime(?)")
+            params.append(start_time)
+        if end_time:
+            where.append("datetime(created_at) <= datetime(?)")
+            params.append(end_time)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(f"SELECT COUNT(*) FROM admin_audit_logs {where_sql}", params)
+                total = cursor.fetchone()[0]
+
+                cursor.execute(
+                    f'''
+                    SELECT id, actor_user_id, actor_username, action, target_type, target_id,
+                           result, ip_address, details, created_at
+                    FROM admin_audit_logs
+                    {where_sql}
+                    ORDER BY datetime(created_at) DESC, id DESC
+                    LIMIT ? OFFSET ?
+                    ''',
+                    params + [safe_limit, safe_offset],
+                )
+
+                logs = []
+                for row in cursor.fetchall():
+                    try:
+                        parsed_details = json.loads(row[8] or '{}')
+                    except Exception:
+                        parsed_details = {"raw": row[8]}
+                    logs.append({
+                        "id": row[0],
+                        "actor_user_id": row[1],
+                        "actor_username": row[2],
+                        "action": row[3],
+                        "target_type": row[4],
+                        "target_id": row[5],
+                        "result": row[6],
+                        "ip_address": row[7],
+                        "details": parsed_details,
+                        "created_at": row[9],
+                    })
+
+                return {"logs": logs, "total": total, "limit": safe_limit, "offset": safe_offset}
+            except Exception as e:
+                logger.error(f"查询管理员审计日志失败: {e}")
+                return {"logs": [], "total": 0, "limit": safe_limit, "offset": safe_offset}
 
     def get_all_users(self):
         """获取所有用户信息（管理员专用）"""
