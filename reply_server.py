@@ -22,6 +22,7 @@ import queue
 from collections import defaultdict
 
 import cookie_manager
+import admin_health_summary
 from db_manager import db_manager
 from file_log_collector import setup_file_logging, get_file_log_collector
 from ai_reply_engine import ai_reply_engine
@@ -61,7 +62,6 @@ KEYWORDS_FILE = Path(__file__).parent / "回复关键字.txt"
 
 # 简单的用户认证配置
 ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin123"  # 系统初始化时的默认密码
 SESSION_TOKENS = {}  # 存储会话token: {token: {'user_id': int, 'username': str, 'timestamp': float}}
 TOKEN_EXPIRE_TIME = 24 * 60 * 60  # token过期时间：24小时
 
@@ -940,15 +940,18 @@ def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(s
     return token_data
 
 
+def is_admin_user(user_info: Dict[str, Any]) -> bool:
+    """统一管理员判断，兼容历史 admin 用户名。"""
+    return bool(user_info and (user_info.get('is_admin', False) or user_info.get('username') == ADMIN_USERNAME))
+
+
 def verify_admin_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
     """验证管理员token"""
     user_info = verify_token(credentials)
     if not user_info:
         raise HTTPException(status_code=401, detail="未授权访问")
 
-    # 检查是否是管理员（优先使用is_admin字段，兼容旧的admin用户名判断）
-    is_admin = user_info.get('is_admin', False) or user_info['username'] == ADMIN_USERNAME
-    if not is_admin:
+    if not is_admin_user(user_info):
         raise HTTPException(status_code=403, detail="需要管理员权限")
 
     return user_info
@@ -980,9 +983,7 @@ def get_user_log_prefix(user_info: Dict[str, Any] = None) -> str:
 
 def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     """要求管理员权限"""
-    # 优先使用is_admin字段，兼容旧的admin用户名判断
-    is_admin = current_user.get('is_admin', False) or current_user['username'] == 'admin'
-    if not is_admin:
+    if not is_admin_user(current_user):
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return current_user
 
@@ -1003,6 +1004,75 @@ def log_with_user(level: str, message: str, user_info: Dict[str, Any] = None):
     else:
         logger.info(full_message)
 
+
+def get_request_client_ip(request: Optional[Request] = None) -> str:
+    """获取请求来源 IP，优先使用反向代理传递的 X-Forwarded-For。"""
+    if not request:
+        return ''
+    try:
+        forwarded_for = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+        if forwarded_for:
+            return forwarded_for
+        return request.client.host if request.client else ''
+    except Exception:
+        return ''
+
+
+def record_admin_audit(
+    admin_user: Dict[str, Any],
+    action: str,
+    target_type: str = '',
+    target_id: str = '',
+    result: str = 'success',
+    request: Optional[Request] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """记录管理员高风险操作审计日志；失败不影响主流程。"""
+    try:
+        return db_manager.record_admin_audit_log(
+            actor_user_id=(admin_user or {}).get('user_id'),
+            actor_username=(admin_user or {}).get('username', ''),
+            action=action,
+            target_type=target_type,
+            target_id=str(target_id or ''),
+            result=result,
+            ip_address=get_request_client_ip(request),
+            details=details or {},
+        )
+    except Exception as e:
+        logger.warning(f"记录管理员审计日志失败: {mask_sensitive_text(e)}")
+        return None
+
+
+def _get_blacklist_block_by_cookie(cookie_id: str, buyer_id: str, item_id: str = None) -> Optional[Dict[str, Any]]:
+    """按 cookie 归属检查买家是否命中个人黑名单。"""
+    try:
+        normalized_cookie_id = str(cookie_id or '').strip()
+        normalized_buyer_id = str(buyer_id or '').strip()
+        if not normalized_cookie_id or not normalized_buyer_id:
+            return None
+        cookie_details = db_manager.get_cookie_details(normalized_cookie_id)
+        user_id = cookie_details.get('user_id') if cookie_details else None
+        if not user_id:
+            return None
+        return blacklist_service.is_buyer_blacklisted(
+            user_id=user_id,
+            buyer_id=normalized_buyer_id,
+            cookie_id=normalized_cookie_id,
+            item_id=str(item_id or '').strip() or None,
+        )
+    except Exception as e:
+        logger.warning(f"检查黑名单失败: cookie_id={cookie_id}, buyer_id={buyer_id}, error={mask_sensitive_text(e)}")
+        return None
+
+
+def _format_blacklist_block_message(hit: Dict[str, Any]) -> str:
+    if not hit:
+        return '买家命中黑名单，已拦截'
+    scope_label = {'item': '商品级', 'account': '账号级', 'user': '用户级'}.get(hit.get('scope'), hit.get('scope') or '未知级别')
+    reason = str(hit.get('reason') or '').strip()
+    reason_part = f"，原因：{reason}" if reason else ''
+    return f"买家 {hit.get('buyer_id') or ''} 命中{scope_label}黑名单{reason_part}，已拦截"
 
 def match_reply(cookie_id: str, message: str) -> Optional[str]:
     """根据 cookie_id 及消息内容匹配回复
@@ -2199,7 +2269,7 @@ async def register(request: RegisterRequest):
 
 # 固定的API秘钥（生产环境中应该从配置文件或环境变量读取）
 # 注意：现在从系统设置中读取QQ回复消息秘钥
-API_SECRET_KEY = "xianyu_api_secret_2024"  # 保留作为后备
+API_SECRET_KEY = None
 
 class SendMessageRequest(BaseModel):
     api_key: str
@@ -2221,15 +2291,14 @@ def verify_api_key(api_key: str) -> bool:
         from db_manager import db_manager
         qq_secret_key = db_manager.get_system_setting('qq_reply_secret_key')
 
-        # 如果系统设置中没有配置，使用默认值
         if not qq_secret_key:
-            qq_secret_key = API_SECRET_KEY
+            logger.warning("QQ回复消息API秘钥未配置，拒绝外部调用")
+            return False
 
         return api_key == qq_secret_key
     except Exception as e:
         logger.error(f"验证API秘钥时发生异常: {e}")
-        # 异常情况下使用默认秘钥验证
-        return api_key == API_SECRET_KEY
+        return False
 
 
 @app.post('/send-message', response_model=SendMessageResponse)
@@ -2841,6 +2910,29 @@ async def _run_live_instance_on_manager_loop(
 
 
 
+
+
+@app.get('/admin/health-summary')
+def get_admin_health_summary(admin_user: Dict[str, Any] = Depends(require_admin)):
+    try:
+        captcha_controller = None
+        try:
+            from utils.captcha_remote_control import captcha_controller as active_captcha_controller
+            captcha_controller = active_captcha_controller
+        except Exception:
+            captcha_controller = None
+
+        return admin_health_summary.build_admin_health_summary(
+            current_user=admin_user,
+            db_manager=db_manager,
+            runtime_status_builder=_build_live_runtime_status,
+            captcha_controller=captcha_controller,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"build admin health summary failed: {mask_sensitive_text(exc)}")
+        raise HTTPException(status_code=500, detail=safe_client_error("健康总览加载失败，请稍后重试"))
 
 
 @app.get("/cookies")
@@ -8450,7 +8542,7 @@ def get_all_users(admin_user: Dict[str, Any] = Depends(require_admin)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete('/admin/users/{user_id}')
-def delete_user(user_id: int, admin_user: Dict[str, Any] = Depends(require_admin)):
+def delete_user(user_id: int, request: Request, admin_user: Dict[str, Any] = Depends(require_admin)):
     """删除用户（管理员专用）"""
     from db_manager import db_manager
     try:
@@ -8471,6 +8563,14 @@ def delete_user(user_id: int, admin_user: Dict[str, Any] = Depends(require_admin
 
         if success:
             log_with_user('info', f"用户删除成功: {user_to_delete['username']} (ID: {user_id})", admin_user)
+            record_admin_audit(
+                admin_user,
+                action='user.delete',
+                target_type='user',
+                target_id=str(user_id),
+                request=request,
+                details={'username': user_to_delete.get('username'), 'email': user_to_delete.get('email')},
+            )
             return {"message": f"用户 {user_to_delete['username']} 删除成功"}
         else:
             log_with_user('error', f"用户删除失败: {user_to_delete['username']} (ID: {user_id})", admin_user)
@@ -8482,7 +8582,7 @@ def delete_user(user_id: int, admin_user: Dict[str, Any] = Depends(require_admin
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put('/admin/users/{user_id}/admin-status')
-def update_user_admin_status(user_id: int, is_admin: bool, admin_user: Dict[str, Any] = Depends(require_admin)):
+def update_user_admin_status(user_id: int, is_admin: bool, request: Request, admin_user: Dict[str, Any] = Depends(require_admin)):
     """更新用户管理员状态（管理员专用）"""
     from db_manager import db_manager
     try:
@@ -8504,6 +8604,14 @@ def update_user_admin_status(user_id: int, is_admin: bool, admin_user: Dict[str,
         if success:
             action = "设置为管理员" if is_admin else "取消管理员权限"
             log_with_user('info', f"用户 {target_user['username']} 已{action}", admin_user)
+            record_admin_audit(
+                admin_user,
+                action='user.admin_status.update',
+                target_type='user',
+                target_id=str(user_id),
+                request=request,
+                details={'username': target_user.get('username'), 'is_admin': is_admin},
+            )
             return {
                 "success": True,
                 "message": f"用户 {target_user['username']} 已{action}",
@@ -8518,6 +8626,37 @@ def update_user_admin_status(user_id: int, is_admin: bool, admin_user: Dict[str,
     except Exception as e:
         log_with_user('error', f"更新用户管理员状态异常: {str(e)}", admin_user)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/admin/audit-logs')
+def get_admin_audit_logs(
+    actor_user_id: Optional[int] = None,
+    action: Optional[str] = None,
+    target_type: Optional[str] = None,
+    result: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    admin_user: Dict[str, Any] = Depends(require_admin),
+):
+    """查询管理员高风险操作审计日志。"""
+    try:
+        audit_result = db_manager.get_admin_audit_logs(
+            actor_user_id=actor_user_id,
+            action=action,
+            target_type=target_type,
+            result=result,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            offset=offset,
+        )
+        return {"success": True, **audit_result}
+    except Exception as e:
+        log_with_user('error', f"查询管理员审计日志失败: {str(e)}", admin_user)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get('/admin/risk-control-logs')
 async def get_admin_risk_control_logs(
@@ -8987,7 +9126,7 @@ def get_item_reply(cookie_id: str, item_id: str, current_user: Dict[str, Any] = 
 # ------------------------- 数据库备份和恢复接口 -------------------------
 
 @app.get('/admin/backup/download')
-def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)):
+def download_database_backup(request: Request, admin_user: Dict[str, Any] = Depends(require_admin)):
     """下载数据库备份文件（管理员专用）"""
     import os
     from fastapi.responses import FileResponse
@@ -9010,6 +9149,14 @@ def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)
         download_filename = f"xianyu_backup_{timestamp}.db"
 
         log_with_user('info', f"开始下载数据库备份: {download_filename}", admin_user)
+        record_admin_audit(
+            admin_user,
+            action='backup.download',
+            target_type='backup',
+            target_id=download_filename,
+            request=request,
+            details={'db_path': db_file_path},
+        )
 
         return FileResponse(
             path=db_file_path,
@@ -9024,8 +9171,11 @@ def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/admin/backup/upload')
-async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_admin),
-                                backup_file: UploadFile = File(...)):
+async def upload_database_backup(
+    request: Request,
+    admin_user: Dict[str, Any] = Depends(require_admin),
+    backup_file: UploadFile = File(...)
+):
     """上传并恢复数据库备份文件（管理员专用）"""
     import os
     import shutil
@@ -9117,6 +9267,20 @@ async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_ad
                 log_with_user('info', "已恢复原数据库", admin_user)
             raise HTTPException(status_code=500, detail="数据库恢复失败，已回滚到原数据库")
 
+        record_admin_audit(
+            admin_user,
+            action='backup.upload_restore',
+            target_type='backup',
+            target_id=backup_file.filename,
+            request=request,
+            details={
+                'uploaded_filename': backup_file.filename,
+                'uploaded_size': len(content),
+                'rollback_backup': backup_current_path,
+                'user_count': len(test_users),
+            },
+        )
+
         return {
             "success": True,
             "message": "数据库恢复成功",
@@ -9189,7 +9353,8 @@ def get_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require
             'users', 'cookies', 'cookie_status', 'keywords', 'default_replies', 'default_reply_records',
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
-            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', "item_replay"
+            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', "item_replay",
+            'admin_audit_logs'
         ]
 
         if table_name not in allowed_tables:
@@ -9215,7 +9380,7 @@ def get_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/admin/data/{table_name}/export')
-def export_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require_admin)):
+def export_table_data(table_name: str, request: Request, admin_user: Dict[str, Any] = Depends(require_admin)):
     """导出指定表的数据为Excel文件（管理员专用）"""
     from db_manager import db_manager
     import io
@@ -9228,7 +9393,7 @@ def export_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(requ
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
             'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', 'item_replay',
-            'risk_control_logs'
+            'risk_control_logs', 'admin_audit_logs'
         ]
 
         if table_name not in allowed_tables:
@@ -9265,6 +9430,14 @@ def export_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(requ
         output.seek(0)
 
         log_with_user('info', f"表 {table_name} 导出成功，共 {len(data)} 条记录", admin_user)
+        record_admin_audit(
+            admin_user,
+            action='data.export',
+            target_type='table',
+            target_id=table_name,
+            request=request,
+            details={'row_count': len(data)},
+        )
 
         from fastapi.responses import StreamingResponse
         return StreamingResponse(
@@ -9280,7 +9453,7 @@ def export_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(requ
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete('/admin/data/{table_name}/{record_id}')
-def delete_table_record(table_name: str, record_id: str, admin_user: Dict[str, Any] = Depends(require_admin)):
+def delete_table_record(table_name: str, record_id: str, request: Request, admin_user: Dict[str, Any] = Depends(require_admin)):
     """删除指定表的指定记录（管理员专用）"""
     from db_manager import db_manager
     try:
@@ -9308,6 +9481,14 @@ def delete_table_record(table_name: str, record_id: str, admin_user: Dict[str, A
 
         if success:
             log_with_user('info', f"表记录删除成功: {table_name}.{record_id}", admin_user)
+            record_admin_audit(
+                admin_user,
+                action='data.delete_record',
+                target_type='table_record',
+                target_id=f'{table_name}.{record_id}',
+                request=request,
+                details={'table_name': table_name, 'record_id': record_id},
+            )
             return {"success": True, "message": "删除成功"}
         else:
             log_with_user('warning', f"表记录删除失败: {table_name}.{record_id}", admin_user)
@@ -9320,7 +9501,7 @@ def delete_table_record(table_name: str, record_id: str, admin_user: Dict[str, A
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete('/admin/data/{table_name}')
-def clear_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require_admin)):
+def clear_table_data(table_name: str, request: Request, admin_user: Dict[str, Any] = Depends(require_admin)):
     """清空指定表的所有数据（管理员专用）"""
     from db_manager import db_manager
     try:
@@ -9349,6 +9530,14 @@ def clear_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(requi
 
         if success:
             log_with_user('info', f"表数据清空成功: {table_name}", admin_user)
+            record_admin_audit(
+                admin_user,
+                action='data.clear_table',
+                target_type='table',
+                target_id=table_name,
+                request=request,
+                details={'table_name': table_name},
+            )
             return {"success": True, "message": "清空成功"}
         else:
             log_with_user('warning', f"表数据清空失败: {table_name}", admin_user)
@@ -10565,7 +10754,7 @@ async def check_for_updates(current_user: Dict[str, Any] = Depends(get_current_u
 
 
 @app.post('/api/update/apply')
-async def apply_updates(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def apply_updates(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     应用更新
     
@@ -10573,7 +10762,7 @@ async def apply_updates(current_user: Dict[str, Any] = Depends(get_current_user)
     """
     try:
         # 只允许管理员执行更新，兼容历史 admin 用户名判断
-        if not current_user.get('is_admin') and current_user.get('username') != 'admin':
+        if not is_admin_user(current_user):
             raise HTTPException(status_code=403, detail="只有管理员可以执行更新")
         
         updater = get_updater()
@@ -10586,6 +10775,20 @@ async def apply_updates(current_user: Dict[str, Any] = Depends(get_current_user)
             log_with_user('info', f"更新完成: {result['message']}", current_user)
         else:
             log_with_user('error', f"更新失败: {result['message']}", current_user)
+        record_admin_audit(
+            current_user,
+            action='update.apply',
+            target_type='update',
+            target_id=result.get('new_version') or '',
+            result='success' if result.get('success') else 'failed',
+            request=request,
+            details={
+                'message': result.get('message'),
+                'updated_files': result.get('updated_files', []),
+                'deleted_files': result.get('deleted_files', []),
+                'needs_restart': result.get('needs_restart'),
+            },
+        )
         
         return {
             "success": result["success"],
@@ -10643,8 +10846,7 @@ async def get_local_file_hashes(current_user: Dict[str, Any] = Depends(get_curre
     用于服务端比对哪些文件需要更新
     """
     try:
-        # 只允许管理员查看（检查username是否为admin）
-        if current_user.get('username') != 'admin':
+        if not is_admin_user(current_user):
             raise HTTPException(status_code=403, detail="只有管理员可以查看文件哈希")
         
         updater = get_updater()
@@ -10670,7 +10872,7 @@ async def get_local_file_hashes(current_user: Dict[str, Any] = Depends(get_curre
 
 
 @app.post('/api/update/cleanup-backups')
-async def cleanup_old_backups(days: int = 7, current_user: Dict[str, Any] = Depends(get_current_user)):
+async def cleanup_old_backups(request: Request, days: int = 7, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     清理旧的备份文件
     
@@ -10678,14 +10880,21 @@ async def cleanup_old_backups(days: int = 7, current_user: Dict[str, Any] = Depe
         days: 保留天数，默认7天
     """
     try:
-        # 只允许管理员执行（检查username是否为admin）
-        if current_user.get('username') != 'admin':
+        if not is_admin_user(current_user):
             raise HTTPException(status_code=403, detail="只有管理员可以清理备份")
         
         updater = get_updater()
         updater.cleanup_old_backups(keep_days=days)
         
         log_with_user('info', f"清理了 {days} 天前的备份文件", current_user)
+        record_admin_audit(
+            current_user,
+            action='update.cleanup_backups',
+            target_type='backup',
+            target_id=str(days),
+            request=request,
+            details={'keep_days': days},
+        )
         
         return {
             "success": True,
@@ -10710,8 +10919,7 @@ async def get_file_changes(current_user: Dict[str, Any] = Depends(get_current_us
     用于检测哪些文件在更新后被本地修改过
     """
     try:
-        # 只允许管理员查看
-        if current_user.get('username') != 'admin':
+        if not is_admin_user(current_user):
             raise HTTPException(status_code=403, detail="只有管理员可以查看文件变化")
         
         updater = get_updater()
@@ -10733,21 +10941,28 @@ async def get_file_changes(current_user: Dict[str, Any] = Depends(get_current_us
 
 
 @app.post('/api/update/save-hashes')
-async def save_current_hashes(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def save_current_hashes(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     手动保存当前文件的哈希清单
     
     用于记录当前状态，以便以后比较
     """
     try:
-        # 只允许管理员执行
-        if current_user.get('username') != 'admin':
+        if not is_admin_user(current_user):
             raise HTTPException(status_code=403, detail="只有管理员可以保存哈希清单")
         
         updater = get_updater()
         updater.save_file_hashes(updater.current_version)
         
         log_with_user('info', "手动保存文件哈希清单", current_user)
+        record_admin_audit(
+            current_user,
+            action='update.save_hashes',
+            target_type='update',
+            target_id=updater.current_version,
+            request=request,
+            details={'version': updater.current_version},
+        )
         
         return {
             "success": True,
@@ -10770,8 +10985,7 @@ async def get_saved_hashes(current_user: Dict[str, Any] = Depends(get_current_us
     获取上次保存的文件哈希清单
     """
     try:
-        # 只允许管理员查看
-        if current_user.get('username') != 'admin':
+        if not is_admin_user(current_user):
             raise HTTPException(status_code=403, detail="只有管理员可以查看哈希清单")
         
         updater = get_updater()
@@ -10806,18 +11020,24 @@ async def get_saved_hashes(current_user: Dict[str, Any] = Depends(get_current_us
 
 
 @app.post('/api/update/restart')
-async def restart_application(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def restart_application(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     重启应用（用于更新后重启）
     
     注意：此操作会重启整个应用
     """
     try:
-        # 只允许管理员执行
-        if not current_user.get('is_admin'):
+        if not is_admin_user(current_user):
             raise HTTPException(status_code=403, detail="只有管理员可以重启应用")
         
         log_with_user('info', "用户请求重启应用", current_user)
+        record_admin_audit(
+            current_user,
+            action='update.restart',
+            target_type='application',
+            target_id='process',
+            request=request,
+        )
         
         import subprocess
         import sys

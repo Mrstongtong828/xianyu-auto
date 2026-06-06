@@ -196,6 +196,20 @@ function showSection(sectionName) {
     }
 }
 
+function getAuthToken() {
+    authToken = localStorage.getItem('auth_token');
+    return authToken || '';
+}
+
+async function authenticatedFetch(url, opts = {}) {
+    const token = getAuthToken();
+    const nextOpts = { ...opts, headers: { ...(opts.headers || {}) } };
+    if (token) {
+        nextOpts.headers['Authorization'] = `Bearer ${token}`;
+    }
+    return fetch(url, nextOpts);
+}
+
 // 移动端侧边栏切换
 function toggleSidebar() {
     document.getElementById('sidebar').classList.toggle('show');
@@ -317,11 +331,7 @@ function initDarkMode() {
 
 async function fetchDashboardResource(path, fallbackValue) {
     try {
-        const response = await fetch(`${apiBase}${path}`, {
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        });
+        const response = await authenticatedFetch(`${apiBase}${path}`);
 
         if (!response.ok) {
             return fallbackValue;
@@ -1045,21 +1055,131 @@ function renderDashboardAccountOverview(accounts, totalItems = 0) {
         : '<div class="dashboard-account-empty"><i class="bi bi-inbox me-1"></i>暂无禁用账号</div>';
 }
 
+function getDashboardHealthLevelMeta(level) {
+    const normalized = String(level || '').toLowerCase();
+    if (normalized === 'critical') {
+        return { text: '严重', className: 'danger', icon: 'exclamation-octagon' };
+    }
+    if (normalized === 'warning') {
+        return { text: '需关注', className: 'warning text-dark', icon: 'exclamation-triangle' };
+    }
+    return { text: '正常', className: 'success', icon: 'check-circle' };
+}
+
+function renderDashboardHealthSummary(payload) {
+    const container = document.getElementById('dashboardHealthSummary');
+    const updatedAt = document.getElementById('dashboardHealthUpdatedAt');
+    if (!container) {
+        return;
+    }
+
+    if (!payload || payload.success === false) {
+        container.innerHTML = `
+            <div class="text-danger">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                健康状态加载失败，请稍后刷新。
+            </div>
+        `;
+        return;
+    }
+
+    const levelMeta = getDashboardHealthLevelMeta(payload.summary?.level);
+    const accounts = payload.accounts || {};
+    const credentials = payload.credentials || {};
+    const captcha = payload.captcha || {};
+    const recentFailures = payload.recent_failures || {};
+    const failures = Array.isArray(recentFailures.items) ? recentFailures.items : [];
+
+    if (updatedAt) {
+        updatedAt.textContent = `最后更新: ${formatDateTime(payload.generated_at || '') || '-'}`;
+    }
+
+    const failureHtml = failures.length
+        ? failures.slice(0, 5).map(item => {
+            const sourceText = item.source === 'risk_control' ? '风控' : '任务';
+            const taskType = item.task_type || sourceText;
+            const status = item.status || '-';
+            const cookieText = item.cookie_id ? `账号 ${escapeHtml(item.cookie_id)}` : '全局';
+            return `
+                <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                    <span>
+                        <span class="badge bg-light text-dark me-2">${escapeHtml(sourceText)}</span>
+                        ${escapeHtml(taskType)}
+                        <small class="text-muted ms-2">${cookieText}</small>
+                    </span>
+                    <span class="badge bg-warning text-dark">${escapeHtml(status)}</span>
+                </li>
+            `;
+        }).join('')
+        : '<li class="list-group-item px-0 text-muted">暂无最近失败任务</li>';
+
+    container.innerHTML = `
+        <div class="row g-3 align-items-stretch">
+            <div class="col-md-3">
+                <div class="border rounded-3 p-3 h-100">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <span class="badge bg-${levelMeta.className}">
+                            <i class="bi bi-${levelMeta.icon} me-1"></i>${levelMeta.text}
+                        </span>
+                    </div>
+                    <div class="fs-4 fw-semibold">${Number(payload.summary?.issues || 0)}</div>
+                    <div class="text-muted small">待关注事项</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded-3 p-3 h-100">
+                    <div class="text-muted small mb-1">账号在线状态</div>
+                    <div class="fs-5 fw-semibold">${Number(accounts.online || 0)} / ${Number(accounts.total || 0)}</div>
+                    <div class="text-muted small">离线 ${Number(accounts.offline || 0)}，禁用 ${Number(accounts.disabled || 0)}</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded-3 p-3 h-100">
+                    <div class="text-muted small mb-1">Cookie / Token</div>
+                    <div class="fs-5 fw-semibold">${Number(credentials.suspected_expired || 0)}</div>
+                    <div class="text-muted small">疑似失效或需处理</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded-3 p-3 h-100">
+                    <div class="text-muted small mb-1">验证码待处理</div>
+                    <div class="fs-5 fw-semibold">${Number(captcha.pending || 0)}</div>
+                    <div class="text-muted small">活跃会话 ${Number(captcha.active || 0)}</div>
+                </div>
+            </div>
+        </div>
+        <div class="mt-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0">最近异常</h6>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="showSection('logs')">
+                    查看日志中心
+                </button>
+            </div>
+            <ul class="list-group list-group-flush">${failureHtml}</ul>
+        </div>
+    `;
+}
+
+async function loadDashboardHealthSummary() {
+    try {
+        const payload = await fetchJSON(`${apiBase}/admin/health-summary`);
+        renderDashboardHealthSummary(payload);
+    } catch (error) {
+        console.error('加载系统健康总览失败:', error);
+        renderDashboardHealthSummary({ success: false });
+    }
+}
+
 // 加载仪表盘数据
 async function loadDashboard() {
     try {
     toggleLoading(true);
     loadDashboardAnnouncement();
+    await loadDashboardHealthSummary();
 
     // 获取账号列表
-    const cookiesResponse = await fetch(`${apiBase}/cookies/details`, {
-        headers: {
-        'Authorization': `Bearer ${authToken}`
-        }
-    });
-
-    if (cookiesResponse.ok) {
-        const cookiesData = await cookiesResponse.json();
+    const cookiesData = await fetchJSON(`${apiBase}/cookies/details`);
+    if (Array.isArray(cookiesData)) {
 
         const accountsWithKeywords = await enrichDashboardAccounts(cookiesData);
 
@@ -1137,17 +1257,7 @@ async function refreshDashboardRuntimeSnapshots() {
 // 加载商品总数
 async function loadItemsCount() {
     try {
-        const response = await fetch(`${apiBase}/items`, {
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error('获取商品列表失败');
-        }
-
-        const data = await response.json();
+        const data = await fetchJSON(`${apiBase}/items`);
         const items = Array.isArray(data.items) ? data.items : [];
         return items.length;
     } catch (error) {
@@ -1166,14 +1276,7 @@ async function loadOrderDashboardMetrics() {
     };
 
     try {
-        const token = localStorage.getItem('auth_token');
-        const response = await fetch('/api/orders', {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
-        });
-
-        const data = await response.json();
+        const data = await fetchJSON('/api/orders');
         if (!data.success) {
             console.error('加载订单数量失败:', data.message);
             updateDashboardOrderMetrics(defaultMetrics);
@@ -1240,14 +1343,7 @@ async function loadSalesSummary() {
     showSalesLoadingState(monthSalesEl);
     
     try {
-        const token = localStorage.getItem('auth_token');
-        const response = await fetch('/api/sales/summary', {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
-        });
-
-        const data = await response.json();
+        const data = await fetchJSON('/api/sales/summary');
         if (data.success && data.data) {
             updateDashboardSalesMetrics(data.data);
         } else {
@@ -1322,17 +1418,12 @@ function startSalesSummaryRefreshTimer() {
     // 每5分钟刷新一次
     salesSummaryRefreshTimer = setInterval(async () => {
         try {
-            const token = localStorage.getItem('auth_token');
-            if (!token) {
+            if (!getAuthToken()) {
                 clearInterval(salesSummaryRefreshTimer);
                 return;
             }
             
-            const response = await fetch('/api/sales/summary', {
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
+            const response = await authenticatedFetch('/api/sales/summary');
 
             const data = await response.json();
             if (data.success && data.data) {
@@ -1408,7 +1499,6 @@ async function loadSalesChart(period) {
     setDateRangePickerVisible(false);
     
     try {
-        const token = localStorage.getItem('auth_token');
         let startDate, endDate;
         const now = new Date();
 
@@ -1423,13 +1513,7 @@ async function loadSalesChart(period) {
         const startDateStr = startDate.toISOString().split('T')[0];
         const endDateStr = now.toISOString().split('T')[0];
 
-        const response = await fetch(`/api/sales?start_date=${startDateStr}&end_date=${endDateStr}`, {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
-        });
-
-        const data = await response.json();
+        const data = await fetchJSON(`/api/sales?start_date=${startDateStr}&end_date=${endDateStr}`);
         if (data.success && data.data) {
             currentChartPeriod = period;
             renderSalesChart(data.data.sales, period);
@@ -1461,14 +1545,7 @@ async function loadCustomSalesChart() {
     updateChartButtonState('custom');
 
     try {
-        const token = localStorage.getItem('auth_token');
-        const response = await fetch(`/api/sales?start_date=${startDate}&end_date=${endDate}`, {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
-        });
-
-        const data = await response.json();
+        const data = await fetchJSON(`/api/sales?start_date=${startDate}&end_date=${endDate}`);
         if (data.success && data.data) {
             currentChartPeriod = 'custom';
             renderSalesChart(data.data.sales, 'custom');
@@ -3315,13 +3392,7 @@ async function handleApiError(err) {
 async function fetchJSON(url, opts = {}) {
     toggleLoading(true);
     try {
-    // 添加认证头
-    if (authToken) {
-        opts.headers = opts.headers || {};
-        opts.headers['Authorization'] = `Bearer ${authToken}`;
-    }
-
-    const res = await fetch(url, opts);
+    const res = await authenticatedFetch(url, opts);
     if (res.status === 401) {
         // 未授权，跳转到登录页面
         localStorage.removeItem('auth_token');
@@ -16449,7 +16520,8 @@ const tableDescriptions = {
     'system_settings': '系统设置表',
     'email_verifications': '邮箱验证表',
     'captcha_codes': '验证码表',
-    'orders': '订单表'
+    'orders': '订单表',
+    'admin_audit_logs': '管理员审计日志表'
 };
 
 // 加载数据管理页面
@@ -16554,6 +16626,11 @@ async function loadTableData() {
             currentData = data.data;
             displayTableData(data.data, data.columns);
             updateTableInfo(selectedTable, data.data.length);
+            const clearBtn = document.getElementById('clearBtn');
+            if (clearBtn) {
+                clearBtn.disabled = selectedTable === 'admin_audit_logs';
+                clearBtn.title = selectedTable === 'admin_audit_logs' ? '审计日志不支持前台清空' : '';
+            }
         } else {
             showToast('加载数据失败: ' + data.message, 'danger');
             showNoData();
@@ -16600,11 +16677,13 @@ function displayTableData(data, columns) {
 
         // 添加操作列（删除按钮）
         const recordId = row.id || row.user_id || index;
-        const actionCell = `<td>
-            <button class="btn btn-danger btn-sm" onclick="deleteRecordByIndex(${index})" title="删除记录">
-                <i class="bi bi-trash"></i>
-            </button>
-        </td>`;
+        const actionCell = currentTable === 'admin_audit_logs'
+            ? '<td><span class="text-muted">只读</span></td>'
+            : `<td>
+                <button class="btn btn-danger btn-sm" onclick="deleteRecordByIndex(${index})" title="删除记录">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </td>`;
 
         return `<tr>${dataCells}${actionCell}</tr>`;
     }).join('');

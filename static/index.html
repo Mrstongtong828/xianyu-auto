@@ -292,6 +292,22 @@
           </div>
         </div>
 
+        <div class="card dashboard-health-card mb-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">
+              <i class="bi bi-heart-pulse me-2"></i>
+              系统健康与任务状态
+            </h5>
+            <small class="text-muted" id="dashboardHealthUpdatedAt">最后更新: -</small>
+          </div>
+          <div class="card-body" id="dashboardHealthSummary">
+            <div class="text-muted">
+              <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+              正在加载健康状态...
+            </div>
+          </div>
+        </div>
+
         <div class="card dashboard-orders-card mb-4">
           <div class="card-header">
             <h5 class="mb-0">
@@ -3385,6 +3401,7 @@
                   <option value="email_verifications">email_verifications - 邮箱验证表</option>
                   <option value="captcha_codes">captcha_codes - 验证码表</option>
                   <option value="orders">orders - 订单表</option>
+                  <option value="admin_audit_logs">admin_audit_logs - 管理员审计日志表</option>
                 </select>
               </div>
               <div class="col-md-3">
